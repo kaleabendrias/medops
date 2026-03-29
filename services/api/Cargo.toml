@@ -1,0 +1,27 @@
+[package]
+name = "api-service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aes-gcm = { version = "0.10", features = ["aes"] }
+argon2 = { version = "0.5", features = ["std"] }
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+cron = "0.12"
+contracts = { path = "../../crates/contracts" }
+hex = "0.4"
+rand = "0.8"
+regex = "1.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rocket = { version = "0.5.1", features = ["json"] }
+rocket_cors = "0.6"
+scraper = "0.24"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "mysql", "migrate", "macros"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
+toml = "0.8"

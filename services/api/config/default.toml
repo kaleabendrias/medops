@@ -1,0 +1,36 @@
+[server]
+host = "0.0.0.0"
+port = 8000
+allowed_origins = ["http://localhost:8080"]
+
+[database]
+url = "mysql://app_user:app_password_local@mysql:3306/hospital_platform"
+max_connections = 20
+min_connections = 3
+connect_timeout_secs = 10
+
+[security]
+[security.key_bootstrap]
+strategy = "generate_if_missing"
+key_file = "/var/lib/rocket-api/keys/encryption.key"
+key_length = 32
+
+[session]
+cookie_name = "hospital_session"
+secure = false
+http_only = true
+same_site = "Lax"
+ttl_minutes = 480
+
+[auth_policy]
+password_min_length = 12
+lockout_failed_attempts = 5
+lockout_minutes = 15
+session_inactivity_minutes = 480
+offline_only = true
+
+[retention]
+audit_log_days = 365
+session_days = 30
+patient_record_days = 2555
+clinical_years_min = 7

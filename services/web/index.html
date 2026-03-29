@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hospital Platform</title>
+    <style>
+      :root {
+        --bg-top: #f4efe7;
+        --bg-bottom: #e2d5c0;
+        --panel: #fff9f0;
+        --panel-alt: #f2e6d5;
+        --text: #17212d;
+        --muted: #4a5a6a;
+        --line: #d7c7af;
+        --brand: #9d5420;
+        --brand-strong: #7f3f13;
+        --ok-bg: #def7e6;
+        --ok-text: #14532d;
+        --err-bg: #ffe4e8;
+        --err-text: #831843;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", "Candara", "Trebuchet MS", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at 18% 8%, #f7dfbd 0%, transparent 33%),
+          radial-gradient(circle at 85% 2%, #eec7a0 0%, transparent 27%),
+          linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+        min-height: 100vh;
+      }
+
+      .shell {
+        max-width: 1280px;
+        margin: 1.2rem auto;
+        padding: 1rem;
+        display: grid;
+        grid-template-columns: 250px 1fr;
+        gap: 1rem;
+      }
+
+      .login-shell {
+        grid-template-columns: 1fr;
+        max-width: 580px;
+        margin-top: 8vh;
+      }
+
+      .sidebar {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 1rem;
+        box-shadow: 0 14px 30px rgba(59, 42, 25, 0.1);
+        align-self: start;
+        position: sticky;
+        top: 1rem;
+      }
+
+      .sidebar h2 {
+        margin: 0;
+        font-family: "Palatino Linotype", "Book Antiqua", Garamond, serif;
+        font-size: 1.5rem;
+      }
+
+      .workspace {
+        display: grid;
+        gap: 1rem;
+      }
+
+      .panel,
+      .login-card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 1rem;
+        box-shadow: 0 14px 30px rgba(59, 42, 25, 0.1);
+        animation: rise 280ms ease-out;
+      }
+
+      .panel h3,
+      .login-card h1,
+      .subpanel h4 {
+        font-family: "Palatino Linotype", "Book Antiqua", Garamond, serif;
+        margin: 0 0 0.7rem 0;
+      }
+
+      .subpanel {
+        background: var(--panel-alt);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 0.8rem;
+        margin-top: 0.8rem;
+      }
+
+      .cards,
+      .chips {
+        display: grid;
+        gap: 0.7rem;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        margin-top: 0.8rem;
+      }
+
+      .card {
+        background: #f7eddc;
+        border: 1px solid #d8c4a8;
+        border-radius: 10px;
+        padding: 0.7rem;
+      }
+
+      .left {
+        text-align: left;
+      }
+
+      .grid-2 {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.8rem;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 0.6rem;
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .muted {
+        color: var(--muted);
+        margin: 0.2rem 0;
+        font-size: 0.93rem;
+      }
+
+      .chip {
+        background: #ead7bc;
+        border-radius: 999px;
+        border: 1px solid #ceb18e;
+        padding: 0.25rem 0.6rem;
+        font-size: 0.82rem;
+      }
+
+      input,
+      textarea,
+      button {
+        font: inherit;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        border: 1px solid #c6b191;
+        border-radius: 9px;
+        padding: 0.5rem 0.6rem;
+        background: #fffdf9;
+        color: var(--text);
+        margin: 0.25rem 0;
+      }
+
+      textarea {
+        min-height: 78px;
+        resize: vertical;
+      }
+
+      button {
+        border: 1px solid #c6b191;
+        border-radius: 9px;
+        background: #f9efdf;
+        color: var(--text);
+        padding: 0.5rem 0.65rem;
+        cursor: pointer;
+        margin: 0.2rem 0;
+        transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+      }
+
+      button:hover {
+        filter: brightness(0.97);
+      }
+
+      button:active {
+        transform: translateY(1px);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.58;
+        box-shadow: none;
+      }
+
+      button:focus-visible,
+      input:focus-visible,
+      textarea:focus-visible {
+        outline: 3px solid rgba(157, 84, 32, 0.35);
+        outline-offset: 2px;
+      }
+
+      .nav {
+        width: 100%;
+        text-align: left;
+      }
+
+      .active,
+      .primary {
+        background: var(--brand);
+        border-color: var(--brand-strong);
+        color: #fffdfb;
+      }
+
+      .danger {
+        background: #b64639;
+        border-color: #7f2e27;
+        color: #fff;
+      }
+
+      .ok,
+      .error {
+        border-radius: 10px;
+        padding: 0.6rem;
+      }
+
+      .ok {
+        color: var(--ok-text);
+        background: var(--ok-bg);
+        border: 1px solid #9edab0;
+      }
+
+      .error {
+        color: var(--err-text);
+        background: var(--err-bg);
+        border: 1px solid #f6b8c8;
+      }
+
+      .delta {
+        border-left: 3px solid var(--brand);
+        padding-left: 0.5rem;
+        margin-top: 0.35rem;
+      }
+
+      .bed-card {
+        border-left: 4px solid #c9a57e;
+      }
+
+      .bed-state {
+        text-transform: uppercase;
+        font-size: 0.74rem;
+        letter-spacing: 0.04em;
+      }
+
+      .bed-state.available {
+        background: #def7e6;
+        border-color: #9edab0;
+        color: #14532d;
+      }
+
+      .bed-state.reserved {
+        background: #fff3d5;
+        border-color: #f0c36d;
+        color: #7a4c00;
+      }
+
+      .bed-state.occupied {
+        background: #ffe4e8;
+        border-color: #f6b8c8;
+        color: #831843;
+      }
+
+      .bed-state.cleaning {
+        background: #e8efff;
+        border-color: #b9cdfc;
+        color: #1e3a8a;
+      }
+
+      .bed-state.out-of-service {
+        background: #ececec;
+        border-color: #cccccc;
+        color: #3a3a3a;
+      }
+
+      .bed-events .card {
+        border-left: 4px solid #9d5420;
+      }
+
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(12px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @media (max-width: 920px) {
+        .shell {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          position: static;
+        }
+
+        .grid-2 {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="main"></div>
+    <script type="module" src="./src/main.rs"></script>
+  </body>
+</html>
