@@ -1,5 +1,0 @@
-{"step":"compose_reset","status":"pass","detail":"ok"}
-{"step":"compose_build_up","status":"pass","detail":"ok"}
-{"step":"api_healthcheck","status":"pass","detail":"ok"}
-{"step":"web_healthcheck","status":"pass","detail":"ok"}
-{"step":"backend_unit_tests","status":"fail","detail":"exit_code=1"}
