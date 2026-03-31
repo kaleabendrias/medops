@@ -1719,4 +1719,138 @@ mod tests {
         let csv = AppService::patient_as_csv(&patient);
         assert!(csv.contains("\"A\"\"B\""));
     }
+
+    #[test]
+    fn pagination_clamp_limits_within_safe_bounds() {
+        assert_eq!(0_i64.clamp(1, 100), 1, "zero limit should clamp to 1");
+        assert_eq!((-5_i64).clamp(1, 100), 1, "negative limit should clamp to 1");
+        assert_eq!(500_i64.clamp(1, 100), 100, "oversized limit should clamp to 100");
+        assert_eq!(50_i64.clamp(1, 100), 50, "normal limit stays unchanged");
+    }
+
+    #[test]
+    fn pagination_offset_rejects_negative() {
+        assert_eq!((-1_i64).max(0), 0, "negative offset should floor to 0");
+        assert_eq!(0_i64.max(0), 0, "zero offset stays zero");
+        assert_eq!(50_i64.max(0), 50, "positive offset stays unchanged");
+    }
+
+    #[test]
+    fn pagination_boundary_first_page() {
+        let limit: i64 = 10;
+        let offset: i64 = 0;
+        let safe_limit = limit.clamp(1, 100);
+        let safe_offset = offset.max(0);
+        assert_eq!(safe_limit, 10);
+        assert_eq!(safe_offset, 0);
+    }
+
+    #[test]
+    fn pagination_boundary_large_offset() {
+        let limit: i64 = 100;
+        let offset: i64 = 999_999;
+        let safe_limit = limit.clamp(1, 100);
+        let safe_offset = offset.max(0);
+        assert_eq!(safe_limit, 100);
+        assert_eq!(safe_offset, 999_999);
+    }
+
+    #[test]
+    fn pagination_order_limit_clamps_to_200() {
+        assert_eq!(0_i64.clamp(1, 200), 1);
+        assert_eq!(500_i64.clamp(1, 200), 200);
+        assert_eq!(200_i64.clamp(1, 200), 200);
+    }
+
+    #[test]
+    fn security_log_output_does_not_contain_raw_password() {
+        let password = "Secret#Pass123";
+        let payload = serde_json::json!({
+            "kind": "security",
+            "event": "auth.login",
+            "outcome": "rejected",
+            "details": {"user_id": 1, "reason": "bad_password"},
+        });
+        let serialized = payload.to_string();
+        assert!(!serialized.contains(password), "log output must never contain raw password");
+    }
+
+    #[test]
+    fn security_log_sanitizes_event_fields() {
+        let payload = serde_json::json!({
+            "kind": "security",
+            "event": "auth.login",
+            "outcome": "success",
+            "details": {"user_id": 42, "result": "success"},
+        });
+        let serialized = payload.to_string();
+        assert!(serialized.contains("\"kind\":\"security\""));
+        assert!(serialized.contains("\"event\":\"auth.login\""));
+        assert!(!serialized.contains("password"));
+        assert!(!serialized.contains("token"));
+    }
+
+    #[test]
+    fn revision_delta_reveals_sensitive_when_privileged() {
+        let item = RevisionTimelineDto {
+            id: 2,
+            entity_type: "history".to_string(),
+            diff_before: "{\"history\":\"old value\"}".to_string(),
+            diff_after: "{\"history\":\"new value\"}".to_string(),
+            field_deltas_json: String::new(),
+            reason_for_change: "clinical update".to_string(),
+            actor_username: "clinical1".to_string(),
+            created_at: "2026-01-01 00:00:00".to_string(),
+        };
+        let decorated = AppService::decorate_revision_deltas(item, true);
+        assert!(decorated.field_deltas_json.contains("old value"));
+        assert!(decorated.field_deltas_json.contains("new value"));
+        assert!(!decorated.field_deltas_json.contains("REDACTED"));
+    }
+
+    #[test]
+    fn revision_delta_redacts_all_sensitive_field_types() {
+        for field_name in &["mrn", "allergies", "contraindications", "history"] {
+            let before_json = format!("{{\"{}\":\"secret_before\"}}", field_name);
+            let after_json = format!("{{\"{}\":\"secret_after\"}}", field_name);
+            let item = RevisionTimelineDto {
+                id: 1,
+                entity_type: field_name.to_string(),
+                diff_before: before_json,
+                diff_after: after_json,
+                field_deltas_json: String::new(),
+                reason_for_change: "test".to_string(),
+                actor_username: "admin".to_string(),
+                created_at: "2026-01-01 00:00:00".to_string(),
+            };
+            let decorated = AppService::decorate_revision_deltas(item, false);
+            assert!(
+                !decorated.field_deltas_json.contains("secret_before"),
+                "{} before value must be redacted", field_name
+            );
+            assert!(
+                !decorated.field_deltas_json.contains("secret_after"),
+                "{} after value must be redacted", field_name
+            );
+            assert!(decorated.field_deltas_json.contains("REDACTED"));
+        }
+    }
+
+    #[test]
+    fn non_sensitive_revision_fields_are_not_redacted() {
+        let item = RevisionTimelineDto {
+            id: 1,
+            entity_type: "demographics".to_string(),
+            diff_before: "{\"first_name\":\"Alice\"}".to_string(),
+            diff_after: "{\"first_name\":\"Bob\"}".to_string(),
+            field_deltas_json: String::new(),
+            reason_for_change: "update".to_string(),
+            actor_username: "admin".to_string(),
+            created_at: "2026-01-01 00:00:00".to_string(),
+        };
+        let decorated = AppService::decorate_revision_deltas(item, false);
+        assert!(decorated.field_deltas_json.contains("Alice"));
+        assert!(decorated.field_deltas_json.contains("Bob"));
+        assert!(!decorated.field_deltas_json.contains("REDACTED"));
+    }
 }

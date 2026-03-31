@@ -801,11 +801,14 @@ impl AppRepository for MySqlAppRepository {
     }
 
     async fn add_patient_visit_note(&self, patient_id: i64, note: &str, actor_id: i64) -> Result<(), ApiError> {
+        let note_cipher = self.field_crypto.encrypt(note)?;
         sqlx::query(
-            "INSERT INTO patient_visit_notes (patient_id, note, created_by, created_at) VALUES (?, ?, ?, NOW())",
+            "INSERT INTO patient_visit_notes (patient_id, note, note_cipher, encryption_key_version, created_by, created_at) VALUES (?, ?, ?, ?, ?, NOW())",
         )
         .bind(patient_id)
-        .bind(note)
+        .bind("[MASKED]")
+        .bind(note_cipher)
+        .bind(self.field_crypto.active_key_version())
         .bind(actor_id)
         .execute(&self.pool)
         .await?;

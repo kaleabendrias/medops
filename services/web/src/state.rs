@@ -3,6 +3,12 @@ use std::collections::HashSet;
 use contracts::MenuEntitlementDto;
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_arch = "wasm32")]
+use gloo_storage::{LocalStorage, Storage};
+
+#[cfg(target_arch = "wasm32")]
+const SESSION_STORAGE_KEY: &str = "hospital_platform_session";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Dashboard,
@@ -33,10 +39,30 @@ pub struct SessionContext {
     pub entitlements: HashSet<String>,
 }
 
-pub fn save_session(_session: &StoredSession) {
+#[cfg(target_arch = "wasm32")]
+pub fn save_session(session: &StoredSession) {
+    let _ = LocalStorage::set(SESSION_STORAGE_KEY, session);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_session(_session: &StoredSession) {}
+
+#[cfg(target_arch = "wasm32")]
 pub fn clear_session() {
+    LocalStorage::delete(SESSION_STORAGE_KEY);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn clear_session() {}
+
+#[cfg(target_arch = "wasm32")]
+pub fn load_session() -> Option<StoredSession> {
+    LocalStorage::get(SESSION_STORAGE_KEY).ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_session() -> Option<StoredSession> {
+    None
 }
 
 pub fn session_from_entitlements(

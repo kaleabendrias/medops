@@ -45,6 +45,100 @@ mod tests {
         let result = FieldCrypto::load_or_bootstrap(&cfg).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn encrypt_then_decrypt_roundtrip_returns_original_text() {
+        let key_file = format!("/tmp/field-crypto-roundtrip-{}.json", std::process::id());
+        let cfg = KeyBootstrapConfig {
+            strategy: "generate_if_missing".to_string(),
+            key_file: key_file.clone(),
+            key_length: 32,
+        };
+        let crypto = FieldCrypto::load_or_bootstrap(&cfg).await.expect("bootstrap");
+        let plaintext = "Patient has severe shellfish allergy. Documented during visit.";
+        let ciphertext = crypto.encrypt(plaintext).expect("encrypt");
+        assert_ne!(ciphertext, plaintext, "ciphertext must differ from plaintext");
+        assert!(!ciphertext.contains(plaintext), "plaintext must not appear within ciphertext");
+        let decrypted = crypto.decrypt(&ciphertext).expect("decrypt");
+        assert_eq!(decrypted, plaintext);
+        let _ = std::fs::remove_file(&key_file);
+    }
+
+    #[tokio::test]
+    async fn ciphertext_format_contains_version_nonce_data() {
+        let key_file = format!("/tmp/field-crypto-format-{}.json", std::process::id());
+        let cfg = KeyBootstrapConfig {
+            strategy: "generate_if_missing".to_string(),
+            key_file: key_file.clone(),
+            key_length: 32,
+        };
+        let crypto = FieldCrypto::load_or_bootstrap(&cfg).await.expect("bootstrap");
+        let ciphertext = crypto.encrypt("test note").expect("encrypt");
+        let parts: Vec<&str> = ciphertext.split(':').collect();
+        assert_eq!(parts.len(), 3, "ciphertext must be version:nonce:data");
+        assert_eq!(parts[0], crypto.active_key_version());
+        let _ = std::fs::remove_file(&key_file);
+    }
+
+    #[tokio::test]
+    async fn two_encryptions_of_same_text_produce_different_ciphertexts() {
+        let key_file = format!("/tmp/field-crypto-nonce-{}.json", std::process::id());
+        let cfg = KeyBootstrapConfig {
+            strategy: "generate_if_missing".to_string(),
+            key_file: key_file.clone(),
+            key_length: 32,
+        };
+        let crypto = FieldCrypto::load_or_bootstrap(&cfg).await.expect("bootstrap");
+        let c1 = crypto.encrypt("same note").expect("encrypt1");
+        let c2 = crypto.encrypt("same note").expect("encrypt2");
+        assert_ne!(c1, c2, "random nonce must produce distinct ciphertexts");
+        let _ = std::fs::remove_file(&key_file);
+    }
+
+    #[tokio::test]
+    async fn decrypt_rejects_tampered_ciphertext() {
+        let key_file = format!("/tmp/field-crypto-tamper-{}.json", std::process::id());
+        let cfg = KeyBootstrapConfig {
+            strategy: "generate_if_missing".to_string(),
+            key_file: key_file.clone(),
+            key_length: 32,
+        };
+        let crypto = FieldCrypto::load_or_bootstrap(&cfg).await.expect("bootstrap");
+        let ciphertext = crypto.encrypt("sensitive visit note").expect("encrypt");
+        let tampered = format!("{}X", ciphertext);
+        assert!(crypto.decrypt(&tampered).is_err());
+        let _ = std::fs::remove_file(&key_file);
+    }
+
+    #[test]
+    fn hash_for_lookup_is_deterministic() {
+        let h1 = FieldCrypto::hash_for_lookup("MRN-12345");
+        let h2 = FieldCrypto::hash_for_lookup("MRN-12345");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64, "SHA256 hex digest must be 64 chars");
+    }
+
+    #[test]
+    fn hash_for_lookup_trims_whitespace() {
+        let h1 = FieldCrypto::hash_for_lookup("  test  ");
+        let h2 = FieldCrypto::hash_for_lookup("test");
+        assert_eq!(h1, h2);
+    }
+
+    #[tokio::test]
+    async fn encrypt_empty_string_roundtrips() {
+        let key_file = format!("/tmp/field-crypto-empty-{}.json", std::process::id());
+        let cfg = KeyBootstrapConfig {
+            strategy: "generate_if_missing".to_string(),
+            key_file: key_file.clone(),
+            key_length: 32,
+        };
+        let crypto = FieldCrypto::load_or_bootstrap(&cfg).await.expect("bootstrap");
+        let ciphertext = crypto.encrypt("").expect("encrypt empty");
+        let decrypted = crypto.decrypt(&ciphertext).expect("decrypt empty");
+        assert_eq!(decrypted, "");
+        let _ = std::fs::remove_file(&key_file);
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

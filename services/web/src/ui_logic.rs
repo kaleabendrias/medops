@@ -168,4 +168,79 @@ mod tests {
         let parsed = parse_revision_deltas("not-json");
         assert!(parsed.is_empty());
     }
+
+    #[test]
+    fn rejects_unsupported_extension() {
+        assert!(validate_attachment("file.exe", "application/octet-stream", 1024).is_err());
+        assert!(validate_attachment("file.docx", "application/vnd.openxmlformats", 1024).is_err());
+        assert!(validate_attachment("file.txt", "text/plain", 1024).is_err());
+    }
+
+    #[test]
+    fn rejects_attachment_one_byte_over_limit() {
+        let over_limit = 25 * 1024 * 1024 + 1;
+        assert!(validate_attachment("scan.png", "image/png", over_limit).is_err());
+    }
+
+    #[test]
+    fn accepts_attachment_one_byte_under_limit() {
+        let under_limit = 25 * 1024 * 1024 - 1;
+        assert!(validate_attachment("scan.png", "image/png", under_limit).is_ok());
+    }
+
+    #[test]
+    fn accepts_zero_byte_attachment() {
+        assert!(validate_attachment("scan.png", "image/png", 0).is_ok());
+    }
+
+    #[test]
+    fn queues_different_files_separately() {
+        let mut queue: Vec<QueuedAttachment> = Vec::new();
+        queue_dropped_attachment(&mut queue, "a.pdf", "application/pdf", b"aaa".to_vec()).unwrap();
+        queue_dropped_attachment(&mut queue, "b.pdf", "application/pdf", b"bbb".to_vec()).unwrap();
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
+    fn cannot_submit_without_patient_selected() {
+        assert!(!can_submit_upload(None, false, 1));
+    }
+
+    #[test]
+    fn cannot_submit_with_empty_queue() {
+        assert!(!can_submit_upload(Some(1), false, 0));
+    }
+
+    #[test]
+    fn idle_state_after_failed_non_uploading_attempt_stays_same() {
+        assert_eq!(
+            upload_state_after_attempt(UploadState::Idle, false),
+            UploadState::Idle
+        );
+    }
+
+    #[test]
+    fn revision_deltas_empty_json_array_parses_to_empty() {
+        let parsed = parse_revision_deltas("[]");
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn revision_deltas_multiple_entries() {
+        let json = r#"[
+            {"field":"first_name","before":"A","after":"B","sensitive":false},
+            {"field":"allergies","before":"none","after":"shellfish","sensitive":true}
+        ]"#;
+        let parsed = parse_revision_deltas(json);
+        assert_eq!(parsed.len(), 2);
+        assert!(!parsed[0].sensitive);
+        assert!(parsed[1].sensitive);
+    }
+
+    #[test]
+    fn validate_attachment_case_insensitive_extension() {
+        assert!(validate_attachment("scan.PDF", "application/pdf", 1024).is_ok());
+        assert!(validate_attachment("photo.JPG", "image/jpeg", 1024).is_ok());
+        assert!(validate_attachment("image.PNG", "image/png", 1024).is_ok());
+    }
 }

@@ -19,6 +19,7 @@ use contracts::{
     TicketSplitRequest, UserSummaryDto, VisitNoteRequest,
 };
 use dioxus::prelude::*;
+use dioxus::html::HasFileData;
 use gloo_timers::future::sleep;
 use components::app_shell::{AppShell, ShellNavItem};
 use components::auth_gate::AuthGate;
@@ -34,7 +35,7 @@ use features::revisions::deltas_for;
 use features::session::can_reveal_revision_fields;
 use state::{
     can_access, clear_session, ensure_accessible_page, is_user_switch,
-    save_session, session_from_entitlements, Page, SessionContext, StoredSession,
+    load_session, save_session, session_from_entitlements, Page, SessionContext, StoredSession,
 };
 use ui_logic::{
     can_submit_upload, queue_dropped_attachment, upload_state_after_attempt,
@@ -230,6 +231,24 @@ fn App() -> Element {
     let mut retention = use_signal(Vec::<RetentionMetricsDto>::new);
     let mut recommendation_kpi = use_signal(|| None::<RecommendationKpiDto>);
     let mut audits = use_signal(Vec::<contracts::AuditLogDto>::new);
+
+    use_future(move || async move {
+        if let Some(stored) = load_session() {
+            match api::menu_entitlements(&stored.token).await {
+                Ok(list) => {
+                    let next_session = session_from_entitlements(stored, list);
+                    let requested = current_hash_page().unwrap_or(Page::Dashboard);
+                    let guarded = ensure_accessible_page(&next_session, requested);
+                    set_hash_page(guarded);
+                    session.set(Some(next_session));
+                    page.set(guarded);
+                }
+                Err(_) => {
+                    clear_session();
+                }
+            }
+        }
+    });
 
     use_future(move || async move {
         loop {
@@ -542,6 +561,44 @@ fn App() -> Element {
                                     ondragover: move |evt| {
                                         evt.prevent_default();
                                         upload_state.set("Drop files on the picker to queue them".to_string());
+                                    },
+                                    ondrop: move |evt| {
+                                        evt.prevent_default();
+                                        if let Some(files) = evt.files() {
+                                            let names = files.files();
+                                            for name in names {
+                                                let file_name = name.clone();
+                                                let files = files.clone();
+                                                spawn(async move {
+                                                    if let Some(contents) = files.read_file(&file_name).await {
+                                                        let guessed_mime = if file_name.to_ascii_lowercase().ends_with(".pdf") {
+                                                            "application/pdf"
+                                                        } else if file_name.to_ascii_lowercase().ends_with(".png") {
+                                                            "image/png"
+                                                        } else {
+                                                            "image/jpeg"
+                                                        };
+                                                        let mut queue = attachment_queue();
+                                                        match queue_dropped_attachment(
+                                                            &mut queue,
+                                                            &file_name,
+                                                            guessed_mime,
+                                                            contents,
+                                                        ) {
+                                                            Ok(_) => {
+                                                                attachment_queue.set(queue);
+                                                                upload_state.set(format!("Queued {file_name}"));
+                                                                upload_state_kind.set(UploadState::Idle);
+                                                                error.set(String::new());
+                                                            }
+                                                            Err(e) => error.set(e),
+                                                        }
+                                                    } else {
+                                                        error.set(format!("Failed to read dropped file {file_name}"));
+                                                    }
+                                                });
+                                            }
+                                        }
                                     },
                                     strong { "Drop + Queue" }
                                     input {
