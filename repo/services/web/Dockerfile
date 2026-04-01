@@ -2,7 +2,10 @@ FROM rust:bookworm AS builder
 
 WORKDIR /workspace
 RUN rustup target add wasm32-unknown-unknown
-RUN cargo install trunk --locked
+RUN set -eux; \
+    TRUNK_VERSION="0.21.14"; \
+    wget -qO- "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+      | tar -xzf- -C /usr/local/bin
 
 COPY . .
 WORKDIR /workspace/services/web
