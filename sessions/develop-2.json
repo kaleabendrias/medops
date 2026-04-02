@@ -12903,7 +12903,7 @@
         "_timestamp": "2026-03-31T08:52:01.335Z"
       }
     ],
-    "skipped_events_count": 11,
+    "skipped_events_count": 13,
     "skipped_events": [
       {
         "type": "file-history-snapshot",
