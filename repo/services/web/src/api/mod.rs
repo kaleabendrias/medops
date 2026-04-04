@@ -626,6 +626,7 @@ pub async fn ingestion_task_runs(token: &str, task_id: i64) -> Result<Vec<Ingest
     .await
 }
 
+#[allow(dead_code)]
 pub async fn send_telemetry_event(token: &str, req: TelemetryEventRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(

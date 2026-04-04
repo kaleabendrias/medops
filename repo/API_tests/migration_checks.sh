@@ -38,12 +38,13 @@ fi
 pass_case "migrations_applied" "all $migration_count of $expected_migrations migrations applied successfully"
 
 latest_migration_file=$(ls -1 services/api/migrations/*.sql | sort | tail -1 | xargs basename)
-latest_applied=$(mysql_query "SELECT description FROM _sqlx_migrations WHERE success = 1 ORDER BY installed_on DESC LIMIT 1;")
-latest_expected=$(echo "$latest_migration_file" | sed 's/\.sql$//')
-if [ "$latest_applied" != "$latest_expected" ]; then
-  fail_case "latest_migration_version" "expected latest migration '$latest_expected', got '$latest_applied'"
+latest_version_applied=$(mysql_query "SELECT MAX(version) FROM _sqlx_migrations WHERE success = 1;")
+expected_version=$(echo "$latest_migration_file" | grep -oP '^\d+' | sed 's/^0*//')
+latest_version_applied=$(echo "$latest_version_applied" | tr -d '[:space:]')
+if [ "$latest_version_applied" != "$expected_version" ]; then
+  fail_case "latest_migration_version" "expected latest migration version $expected_version, got $latest_version_applied"
 fi
-pass_case "latest_migration_version" "latest migration is $latest_applied"
+pass_case "latest_migration_version" "latest migration version is $latest_version_applied"
 
 password_hash_len=$(mysql_query "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns WHERE table_schema='hospital_platform' AND table_name='users' AND column_name='password_hash';")
 if [ -z "$password_hash_len" ] || [ "$password_hash_len" -lt 255 ]; then
