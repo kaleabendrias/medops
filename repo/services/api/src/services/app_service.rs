@@ -66,7 +66,6 @@ impl AppService {
             );
             return Err(ApiError::bad_request("Username and password are required"));
         }
-        self.validate_password_complexity(&req.password)?;
 
         let maybe_user = self.repo.get_user_auth(req.username.trim()).await?;
         let user = match maybe_user {
@@ -100,6 +99,21 @@ impl AppService {
                 "Account is locked for {} minutes after failed logins",
                 self.lockout_minutes
             )));
+        }
+
+        // Validate complexity AFTER user lookup and lockout check so that all
+        // failed attempts — including non-complex passwords — count uniformly
+        // toward the lockout threshold.
+        if self.validate_password_complexity(&req.password).is_err() {
+            self.repo
+                .register_failed_login(user.id, user.failed_attempts + 1)
+                .await?;
+            Self::security_log(
+                "auth.login",
+                "rejected",
+                serde_json::json!({"user_id":user.id,"reason":"non_complex_password"}),
+            );
+            return Err(ApiError::Unauthorized);
         }
 
         let verify = Self::verify_password(&req.password, &user.password_hash)?;
@@ -676,6 +690,7 @@ impl AppService {
             return Err(ApiError::Forbidden);
         }
         Self::validate_attachment(filename, mime_type, bytes.len() as i64)?;
+        Self::verify_content_signature(bytes, mime_type)?;
 
         let safe_name = filename.replace('/', "_");
 
@@ -718,9 +733,48 @@ impl AppService {
         self.repo.set_bed_state(bed_id, req.target_state.trim()).await?;
 
         match (req.action.as_str(), req.related_bed_id) {
+            ("check-in", _) => {
+                let patient_id = req.patient_id.ok_or_else(|| {
+                    ApiError::bad_request("patient_id is required for check-in")
+                })?;
+                self.repo.check_in_patient(bed_id, patient_id).await?;
+                self.repo
+                    .record_bed_event(
+                        "check-in",
+                        Some(bed_id),
+                        None,
+                        Some(&current),
+                        Some(req.target_state.trim()),
+                        user.user_id,
+                        req.note.trim(),
+                        Some(patient_id),
+                    )
+                    .await?;
+            }
+            ("check-out", _) => {
+                self.repo.check_out_patient(bed_id, "check-out").await?;
+                self.repo
+                    .record_bed_event(
+                        "check-out",
+                        Some(bed_id),
+                        None,
+                        Some(&current),
+                        Some(req.target_state.trim()),
+                        user.user_id,
+                        req.note.trim(),
+                        req.patient_id.or(self.repo.active_bed_occupant(bed_id).await?),
+                    )
+                    .await?;
+            }
             ("transfer", Some(target)) => {
                 let target_state = self.repo.get_bed_state(target).await?.ok_or(ApiError::NotFound)?;
                 Self::validate_bed_transition(&target_state, "Occupied")?;
+                // Move occupant from source bed to target bed
+                let occupant = self.repo.active_bed_occupant(bed_id).await?;
+                self.repo.check_out_patient(bed_id, "transfer").await?;
+                if let Some(pid) = occupant {
+                    self.repo.check_in_patient(target, pid).await?;
+                }
                 self.repo.set_bed_state(target, "Occupied").await?;
                 self.repo.set_bed_state(bed_id, "Cleaning").await?;
                 self.repo
@@ -732,6 +786,7 @@ impl AppService {
                         Some("Occupied"),
                         user.user_id,
                         req.note.trim(),
+                        occupant.or(req.patient_id),
                     )
                     .await?;
             }
@@ -739,6 +794,17 @@ impl AppService {
                 let target_state = self.repo.get_bed_state(target).await?.ok_or(ApiError::NotFound)?;
                 if current != "Occupied" || target_state != "Occupied" {
                     return Err(ApiError::bad_request("Swap requires both beds to be Occupied"));
+                }
+                // Swap occupants between the two beds
+                let occupant_a = self.repo.active_bed_occupant(bed_id).await?;
+                let occupant_b = self.repo.active_bed_occupant(target).await?;
+                self.repo.check_out_patient(bed_id, "swap").await?;
+                self.repo.check_out_patient(target, "swap").await?;
+                if let Some(pid) = occupant_a {
+                    self.repo.check_in_patient(target, pid).await?;
+                }
+                if let Some(pid) = occupant_b {
+                    self.repo.check_in_patient(bed_id, pid).await?;
                 }
                 self.repo
                     .record_bed_event(
@@ -749,6 +815,7 @@ impl AppService {
                         Some("Occupied"),
                         user.user_id,
                         req.note.trim(),
+                        occupant_a.or(req.patient_id),
                     )
                     .await?;
             }
@@ -762,6 +829,7 @@ impl AppService {
                         Some(req.target_state.trim()),
                         user.user_id,
                         req.note.trim(),
+                        req.patient_id,
                     )
                     .await?;
             }
@@ -772,9 +840,10 @@ impl AppService {
                 "bedboard.action",
                 "bed",
                 &bed_id.to_string(),
-                &format!("{{\"action\":{},\"target_state\":{}}}",
+                &format!("{{\"action\":{},\"target_state\":{},\"patient_id\":{}}}",
                     serde_json::to_string(req.action.trim()).map_err(|_| ApiError::Internal)?,
-                    serde_json::to_string(req.target_state.trim()).map_err(|_| ApiError::Internal)?),
+                    serde_json::to_string(req.target_state.trim()).map_err(|_| ApiError::Internal)?,
+                    req.patient_id.map(|p| p.to_string()).unwrap_or_else(|| "null".to_string())),
                 user.user_id,
             )
             .await?;
@@ -1123,7 +1192,22 @@ impl AppService {
         self.ensure_order_access(user, &order).await?;
         self.repo
             .add_ticket_split(order_id, req.split_by.trim(), req.split_value.trim(), req.quantity)
-            .await
+            .await?;
+        self.repo
+            .append_audit(
+                "order.ticket_split",
+                "dining_order",
+                &order_id.to_string(),
+                &format!(
+                    "{{\"split_by\":{},\"split_value\":{},\"quantity\":{}}}",
+                    serde_json::to_string(req.split_by.trim()).map_err(|_| ApiError::Internal)?,
+                    serde_json::to_string(req.split_value.trim()).map_err(|_| ApiError::Internal)?,
+                    req.quantity
+                ),
+                user.user_id,
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn list_ticket_splits(&self, user: &AuthUser, order_id: i64) -> Result<Vec<TicketSplitDto>, ApiError> {
@@ -1142,7 +1226,21 @@ impl AppService {
         }
         self.repo
             .add_order_note(order_id, req.note.trim(), user.user_id)
-            .await
+            .await?;
+        self.repo
+            .append_audit(
+                "order.note",
+                "dining_order",
+                &order_id.to_string(),
+                &format!(
+                    "{{\"note_preview\":{}}}",
+                    serde_json::to_string(&req.note.trim().chars().take(80).collect::<String>())
+                        .map_err(|_| ApiError::Internal)?
+                ),
+                user.user_id,
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn order_notes(&self, user: &AuthUser, order_id: i64) -> Result<Vec<OrderNoteDto>, ApiError> {
@@ -1399,6 +1497,24 @@ impl AppService {
         Ok(())
     }
 
+    /// Verify that the first bytes of the uploaded file match the expected
+    /// magic-byte signature for the declared MIME type.  This prevents
+    /// extension/MIME spoofing where the actual file content is a different type.
+    fn verify_content_signature(data: &[u8], mime_type: &str) -> Result<(), ApiError> {
+        let ok = match mime_type {
+            "application/pdf" => data.starts_with(b"%PDF"),
+            "image/jpeg" => data.starts_with(&[0xFF, 0xD8, 0xFF]),
+            "image/png" => data.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+            _ => false,
+        };
+        if !ok {
+            return Err(ApiError::bad_request(
+                "File content does not match declared MIME type (magic-byte mismatch)",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_bed_transition(current: &str, target: &str) -> Result<(), ApiError> {
         let valid = match current {
             "Available" => ["Reserved", "Occupied", "Out of Service"].as_slice(),
@@ -1498,6 +1614,14 @@ impl AppService {
         }
 
         item.field_deltas_json = serde_json::to_string(&deltas).unwrap_or_else(|_| "[]".to_string());
+
+        // Redact raw diff payloads for non-privileged clients to prevent
+        // sensitive data leakage through the revision API.
+        if !reveal_sensitive {
+            item.diff_before = "{}".to_string();
+            item.diff_after = "{}".to_string();
+        }
+
         item
     }
 

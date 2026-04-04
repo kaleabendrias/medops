@@ -151,8 +151,12 @@ pub trait AppRepository: Send + Sync {
         to_state: Option<&str>,
         actor_id: i64,
         note: &str,
+        patient_id: Option<i64>,
     ) -> Result<(), ApiError>;
     async fn list_bed_events(&self) -> Result<Vec<BedEventDto>, ApiError>;
+    async fn check_in_patient(&self, bed_id: i64, patient_id: i64) -> Result<(), ApiError>;
+    async fn check_out_patient(&self, bed_id: i64, reason: &str) -> Result<(), ApiError>;
+    async fn active_bed_occupant(&self, bed_id: i64) -> Result<Option<i64>, ApiError>;
 
     async fn create_menu(&self, menu_date: &str, meal_period: &str, item_name: &str, calories: i32, actor_id: i64) -> Result<(), ApiError>;
     async fn list_menus(&self) -> Result<Vec<DiningMenuDto>, ApiError>;

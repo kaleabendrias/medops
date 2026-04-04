@@ -178,6 +178,10 @@ pub struct BedTransitionRequest {
     pub action: String,
     pub target_state: String,
     pub related_bed_id: Option<i64>,
+    /// Patient being checked in, checked out, transferred, or swapped.
+    /// Required for check-in; used for check-out/transfer/swap traceability.
+    #[serde(default)]
+    pub patient_id: Option<i64>,
     pub note: String,
 }
 

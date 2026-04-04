@@ -1,3 +1,10 @@
+# ──────────────────────────────────────────────────────────────────
+# NON-PRODUCTION DEFAULTS: The credentials below are for local
+# development and offline testing only. Override them via environment
+# variables or a docker-compose.override.yml before deploying to any
+# internet-facing or shared environment.
+# ──────────────────────────────────────────────────────────────────
+
 services:
   mysql:
     image: mysql:8.4
@@ -5,16 +12,16 @@ services:
     restart: unless-stopped
     command: --log-bin-trust-function-creators=1
     environment:
-      MYSQL_ROOT_PASSWORD: root_password_local
-      MYSQL_DATABASE: hospital_platform
-      MYSQL_USER: app_user
-      MYSQL_PASSWORD: app_password_local
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password_local}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-hospital_platform}
+      MYSQL_USER: ${MYSQL_USER:-app_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app_password_local}
     ports:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -proot_password_local --silent"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p${MYSQL_ROOT_PASSWORD:-root_password_local} --silent"]
       interval: 10s
       timeout: 5s
       retries: 12

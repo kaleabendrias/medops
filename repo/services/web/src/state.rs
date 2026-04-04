@@ -24,7 +24,7 @@ pub enum Page {
     Audits,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredSession {
     #[serde(default)]
     pub token: String,
@@ -33,7 +33,7 @@ pub struct StoredSession {
     pub role: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct SessionContext {
     pub stored: StoredSession,
     pub entitlements: HashSet<String>,

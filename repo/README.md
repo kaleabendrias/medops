@@ -121,6 +121,11 @@ If `dx` or `trunk` is not installed, use Docker as the runtime validation bounda
 
 ## Seeded Users
 
+> **NON-PRODUCTION CREDENTIALS.** The credentials below are for local development
+> and offline testing only. They must **never** be reused in staging, production, or
+> any internet-facing environment. For deployment, override all passwords and secrets
+> via environment variables (see *Credential Overrides* below).
+
 Users are seeded from `services/api/migrations`:
 
 - `admin` / `Admin#OfflinePass123`
@@ -129,6 +134,22 @@ Users are seeded from `services/api/migrations`:
 - `clinical1` / `Admin#OfflinePass123`
 - `cafeteria1` / `Admin#OfflinePass123`
 - `lockout_user` / `Admin#OfflinePass123`
+
+### Credential Overrides
+
+All database and application credentials can be overridden via environment variables
+at deploy time without modifying checked-in files:
+
+```bash
+# Example: override MySQL credentials for a deployment profile
+export MYSQL_ROOT_PASSWORD=<strong-random-secret>
+export MYSQL_PASSWORD=<strong-random-secret>
+export DATABASE_URL=mysql://app_user:<password>@mysql:3306/hospital_platform
+
+docker compose up -d
+```
+
+A `docker-compose.override.yml` can also be used to inject secrets per environment.
 
 ## Role Verification (E2E)
 
@@ -150,12 +171,20 @@ API layers in `services/api/src` are intentionally strict:
 - `infrastructure`: MySQL repository adapter and local security primitives.
 - `routes`: Rocket handlers and auth extraction.
 
-Detailed docs:
+### Governance Tiered Storage
 
-- `docs/ARCHITECTURE.md`
-- `docs/SECURITY_COMPLIANCE.md`
-- `docs/TRACEABILITY_MATRIX.md`
-- `docs/ACCEPTANCE_REPORT.md`
+The governance data model uses a **single physical table** (`governance_records`) with a
+`tier` column (`raw`, `cleaned`, `analytics`) and a self-referential `lineage_source_id`
+foreign key for lineage tracking. This is an accepted architectural deviation from
+separate physical tables, chosen for:
+
+1. **Lineage integrity** — cross-tier FK references stay within one table.
+2. **Uniform policy** — append-only audit and tombstone logic apply identically.
+3. **Operational simplicity** — appropriate for a single-hospital offline deployment.
+
+Logical separation is provided via tiered views (`governance_raw`, `governance_cleaned`,
+`governance_analytics`) defined in migration `014_governance_tiered_views.sql`, each
+exposing its tier with explicit lineage joins to source records.
 
 ## Intranet API Surface
 
@@ -171,6 +200,16 @@ Implemented domains include:
 - governance lineage/tombstone behavior
 - experimentation telemetry and analytics endpoints
 - append-only audit log behavior and retention constraints
+
+### Retention API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/retention` | Returns current retention settings snapshot (audit, session, patient record days) |
+| GET | `/api/v1/retention/policies` | Lists all retention policies from database |
+| PUT | `/api/v1/retention/policies/<key>/<years>` | Upserts a retention policy by key and minimum years |
+
+All retention endpoints require authentication. Policy mutation (`PUT`) requires `retention.manage` permission.
 
 ## Configuration Notes
 

@@ -30,11 +30,20 @@ mysql_query() {
   docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "$1"
 }
 
+expected_migrations=$(ls -1 services/api/migrations/*.sql 2>/dev/null | wc -l)
 migration_count=$(mysql_query "SELECT COUNT(*) FROM _sqlx_migrations WHERE success = 1;")
-if [ "$migration_count" -lt 12 ]; then
-  fail_case "migrations_applied" "expected >= 12 successful migrations, got $migration_count"
+if [ "$migration_count" -ne "$expected_migrations" ]; then
+  fail_case "migrations_applied" "expected exactly $expected_migrations successful migrations, got $migration_count"
 fi
-pass_case "migrations_applied" "found $migration_count successful migrations"
+pass_case "migrations_applied" "all $migration_count of $expected_migrations migrations applied successfully"
+
+latest_migration_file=$(ls -1 services/api/migrations/*.sql | sort | tail -1 | xargs basename)
+latest_applied=$(mysql_query "SELECT description FROM _sqlx_migrations WHERE success = 1 ORDER BY installed_on DESC LIMIT 1;")
+latest_expected=$(echo "$latest_migration_file" | sed 's/\.sql$//')
+if [ "$latest_applied" != "$latest_expected" ]; then
+  fail_case "latest_migration_version" "expected latest migration '$latest_expected', got '$latest_applied'"
+fi
+pass_case "latest_migration_version" "latest migration is $latest_applied"
 
 password_hash_len=$(mysql_query "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns WHERE table_schema='hospital_platform' AND table_name='users' AND column_name='password_hash';")
 if [ -z "$password_hash_len" ] || [ "$password_hash_len" -lt 255 ]; then
@@ -97,5 +106,5 @@ fi
 pass_case "order_idempotency_index_scope" "order idempotency index scoped by user"
 
 cat >"$REPORT_DIR/migration_checks.json" <<EOF
-{"suite":"migration_checks","status":"pass","cases":11}
+{"suite":"migration_checks","status":"pass","cases":12}
 EOF

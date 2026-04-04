@@ -88,8 +88,11 @@ if [[ "$admin_hash" != \$argon2id\$* ]]; then
 fi
 pass_case "auth_argon2_migration" "legacy sha256 credentials upgraded to argon2id on login"
 
+# Non-complex passwords are rejected with 401 (same as wrong-password) to avoid
+# leaking which validation step failed.  The failed attempt is still counted
+# toward the lockout threshold.
 code=$(api_call "POST" "/auth/login" "" '{"username":"admin","password":"short"}')
-assert_code "password_policy_enforced" "400" "$code"
+assert_code "password_policy_enforced" "401" "$code"
 
 code=$(api_call "GET" "/patients/search?q=john" "$member_token")
 assert_code "rbac_denial_member_patient_search" "403" "$code"
@@ -547,6 +550,12 @@ if [ "$split_count" -lt 1 ]; then
 fi
 pass_case "order_ticket_split_visible" "ticket split appears in order split timeline"
 
+ticket_split_audit_count=$(mysql_query "SELECT COUNT(*) FROM audit_logs WHERE action_type = 'order.ticket_split' AND entity_id = '$order_id';")
+if [ "$ticket_split_audit_count" -lt 1 ]; then
+  fail_case "order_ticket_split_audit_logged" "expected audit record for ticket split operation"
+fi
+pass_case "order_ticket_split_audit_logged" "ticket split emits audit record with actor and target metadata"
+
 code=$(api_call "POST" "/orders/$order_id/notes" "$admin_token" '{"note":"operations trail"}')
 assert_code "order_note_add" "200" "$code"
 code=$(api_call "GET" "/orders/$order_id/notes" "$admin_token")
@@ -562,6 +571,12 @@ if [ "$note_count" -lt 1 ]; then
   fail_case "order_note_visible" "expected at least one order note"
 fi
 pass_case "order_note_visible" "order notes timeline returns operation history entries"
+
+order_note_audit_count=$(mysql_query "SELECT COUNT(*) FROM audit_logs WHERE action_type = 'order.note' AND entity_id = '$order_id';")
+if [ "$order_note_audit_count" -lt 1 ]; then
+  fail_case "order_note_audit_logged" "expected audit record for order note operation"
+fi
+pass_case "order_note_audit_logged" "order note emits audit record with actor and target metadata"
 
 audit_before=$(mysql_query "SELECT COUNT(*) FROM audit_logs;")
 audit_first_before=$(mysql_query "SELECT action_type FROM audit_logs ORDER BY id ASC LIMIT 1;")
@@ -663,6 +678,33 @@ if [ "$tombstone_ok" != "1" ]; then
 fi
 pass_case "governance_tombstone_behavior" "record tombstoned while retained"
 
+code=$(api_call "POST" "/governance/records" "$admin_token" "{\"tier\":\"analytics\",\"lineage_source_id\":$cleaned_record_id,\"lineage_metadata\":\"lineage:cleaned_to_analytics\",\"payload_json\":\"{\\\"aggregated\\\":true}\"}")
+assert_code "governance_create_analytics" "200" "$code"
+analytics_record_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.json")))')
+
+code=$(api_call "GET" "/governance/records" "$admin_token")
+assert_code "governance_analytics_lineage" "200" "$code"
+analytics_lineage_ok=$(python3 - <<PY
+import json
+raw_id = $raw_record_id
+cleaned_id = $cleaned_record_id
+analytics_id = $analytics_record_id
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+analytics = [x for x in data if x['id'] == analytics_id]
+if not analytics:
+    print('0')
+else:
+    item = analytics[0]
+    has_lineage = item['lineage_source_id'] == cleaned_id and item['tier'] == 'analytics'
+    print('1' if has_lineage else '0')
+PY
+)
+if [ "$analytics_lineage_ok" != "1" ]; then
+  fail_case "governance_analytics_tier_lineage" "analytics record lineage to cleaned source not captured"
+fi
+pass_case "governance_analytics_tier_lineage" "analytics tier record traces lineage through cleaned to raw"
+
 code=$(api_call "POST" "/experiments" "$admin_token" '{"experiment_key":"metrics_suite"}')
 assert_code "experiment_metrics_suite_create" "200" "$code"
 
@@ -691,6 +733,19 @@ then
 else
   fail_case "experiment_metric_calculations" "expected ctr=0.5 and conversion=0.5"
 fi
+
+external_ingestion_payload='{"task_name":"ssrf-probe","seed_urls":["https://evil.example.com/data"],"extraction_rules_json":"{\"mode\":\"css\",\"fields\":[\".record\"]}","pagination_strategy":"breadth-first","max_depth":1,"incremental_field":"value","schedule_cron":"0 * * * *"}'
+code=$(api_call "POST" "/ingestion/tasks" "$admin_token" "$external_ingestion_payload")
+assert_code "ingestion_reject_external_url" "200" "$code"
+ssrf_task_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.json")))')
+code=$(api_call "POST" "/ingestion/tasks/$ssrf_task_id/run" "$admin_token" '')
+assert_code "ingestion_run_external_url_rejected" "200" "$code"
+sleep 2
+ssrf_run_status=$(docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "SELECT status FROM ingestion_task_runs WHERE task_id = $ssrf_task_id ORDER BY id DESC LIMIT 1;")
+if [ "$ssrf_run_status" != "failed" ]; then
+  fail_case "ingestion_ssrf_blocked" "expected external URL ingestion to fail, got status: $ssrf_run_status"
+fi
+pass_case "ingestion_ssrf_blocked" "external/public seed URLs are rejected by intranet allowlist"
 
 ingestion_create_payload='{"task_name":"patient-feed","seed_urls":["file:///app/config/ingestion_fixture/page1.html"],"extraction_rules_json":"{\"mode\":\"css\",\"fields\":[\".record\"],\"pagination_selector\":\"a.next\"}","pagination_strategy":"depth-first","max_depth":2,"incremental_field":"value","schedule_cron":"0 * * * *"}'
 code=$(api_call "POST" "/ingestion/tasks" "$admin_token" "$ingestion_create_payload")

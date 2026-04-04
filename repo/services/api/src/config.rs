@@ -67,7 +67,10 @@ pub struct AuthPolicyConfig {
 impl AppConfig {
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
-        let cfg = toml::from_str(&content)?;
+        let mut cfg: Self = toml::from_str(&content)?;
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            cfg.database.url = url;
+        }
         Ok(cfg)
     }
 }

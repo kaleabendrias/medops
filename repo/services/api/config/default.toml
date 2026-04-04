@@ -1,7 +1,10 @@
 [server]
 host = "0.0.0.0"
 port = 8000
-allowed_origins = ["http://localhost:8080"]
+# Same-origin proxy requests arrive without an Origin header, so the API
+# accepts them by default.  The list below covers direct-access scenarios
+# during local development and typical intranet hostnames.
+allowed_origins = ["http://localhost:8080", "http://127.0.0.1:8080", "http://web:8080"]
 
 [database]
 url = "mysql://app_user:app_password_local@mysql:3306/hospital_platform"

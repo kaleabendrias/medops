@@ -8,8 +8,8 @@ use contracts::{
     IngestionTaskVersionDto, MenuEntitlementDto, OrderCreateRequest, OrderDto, OrderNoteDto,
     OrderNoteRequest, OrderStatusRequest, PatientProfileDto, PatientSearchResultDto,
     PatientExportDto, PatientUpdateRequest, RankingRuleDto, RankingRuleRequest, RecommendationDto,
-    RecommendationKpiDto, RetentionMetricsDto, RevisionTimelineDto, UserSummaryDto,
-    TicketSplitDto, TicketSplitRequest, VisitNoteRequest,
+    RecommendationKpiDto, RetentionMetricsDto, RevisionTimelineDto, TelemetryEventRequest,
+    UserSummaryDto, TicketSplitDto, TicketSplitRequest, VisitNoteRequest,
 };
 use gloo_net::http::{Request, RequestBuilder, Response};
 use serde::de::DeserializeOwned;
@@ -22,7 +22,11 @@ use wasm_bindgen_futures::JsFuture;
 #[cfg(target_arch = "wasm32")]
 use web_sys::{Headers, Request as WebRequest, RequestInit, RequestMode, Response as WebResponse};
 
-const API_BASE: &str = "http://localhost:8000/api/v1";
+/// API base URL uses a same-origin relative path so the browser routes
+/// requests through the nginx reverse proxy.  This avoids hardcoding
+/// `localhost:8000` and allows any intranet client to reach the API via
+/// the web server's address.
+const API_BASE: &str = "/api/v1";
 
 async fn send_builder(builder: RequestBuilder) -> Result<Response, String> {
     let response = builder.send().await.map_err(|e| format!("request failed: {e}"))?;
@@ -620,4 +624,36 @@ pub async fn ingestion_task_runs(token: &str, task_id: i64) -> Result<Vec<Ingest
         token,
     ))
     .await
+}
+
+pub async fn send_telemetry_event(token: &str, req: TelemetryEventRequest) -> Result<(), String> {
+    let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
+    send_request(
+        with_auth(
+            Request::post(&format!("{API_BASE}/telemetry/events")),
+            token,
+        )
+        .header("Content-Type", "application/json")
+        .body(body)
+        .map_err(|e| format!("request build failed: {e}"))?,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Fire-and-forget telemetry helper for UI workflows.
+/// Silently drops errors to avoid disrupting user flows.
+pub fn track_ui_event(token: &str, experiment_key: &str, event_name: &str, payload_json: &str) {
+    let req = TelemetryEventRequest {
+        experiment_key: experiment_key.to_string(),
+        event_name: event_name.to_string(),
+        payload_json: payload_json.to_string(),
+    };
+    let token = token.to_string();
+    #[cfg(target_arch = "wasm32")]
+    dioxus::prelude::spawn(async move {
+        let _ = send_telemetry_event(&token, req).await;
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    { let _ = (token, req); }
 }

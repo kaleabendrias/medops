@@ -151,7 +151,61 @@ impl MySqlAppRepository {
         Ok((mode, fields, pagination_selector))
     }
 
+    /// Approved internal hostnames for intranet ingestion fetches.
+    const INTRANET_ALLOWED_HOSTS: &'static [&'static str] = &[
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "api",
+        "mysql",
+        "web",
+    ];
+
+    /// Approved base directories for file:// ingestion sources.
+    const FILE_ALLOWED_BASES: &'static [&'static str] = &[
+        "/app/config/ingestion_fixture",
+        "/var/lib/rocket-api/ingestion",
+    ];
+
+    fn is_allowed_file_path(path: &str) -> bool {
+        // Reject path traversal attempts
+        let canonical = std::path::Path::new(path);
+        for component in canonical.components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                return false;
+            }
+        }
+        // Reject if the resolved path contains ".." anywhere (belt-and-suspenders)
+        if path.contains("..") {
+            return false;
+        }
+        Self::FILE_ALLOWED_BASES.iter().any(|base| path.starts_with(base))
+    }
+
+    fn is_allowed_intranet_url(url: &str) -> bool {
+        if let Some(path) = url.strip_prefix("file://") {
+            return Self::is_allowed_file_path(path);
+        }
+        if let Ok(parsed) = reqwest::Url::parse(url) {
+            if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                return false;
+            }
+            if let Some(host) = parsed.host_str() {
+                return Self::INTRANET_ALLOWED_HOSTS.iter().any(|&h| h == host)
+                    || host.ends_with(".local")
+                    || host.ends_with(".internal");
+            }
+        }
+        false
+    }
+
     async fn fetch_source(url: &str) -> Result<String, ApiError> {
+        if !Self::is_allowed_intranet_url(url) {
+            return Err(ApiError::bad_request(
+                "Seed URL must use file:// within approved directories or target an approved intranet host (localhost, *.local, *.internal, or Docker service names). Public internet URLs and path traversal are not permitted.",
+            ));
+        }
+
         if let Some(path) = url.strip_prefix("file://") {
             return tokio::fs::read_to_string(path)
                 .await
@@ -180,7 +234,8 @@ impl MySqlAppRepository {
 
     fn normalize_next_url(base_url: &str, href: &str) -> Option<String> {
         if href.starts_with("http://") || href.starts_with("https://") || href.starts_with("file://") {
-            return Some(href.to_string());
+            let candidate = href.to_string();
+            return if Self::is_allowed_intranet_url(&candidate) { Some(candidate) } else { None };
         }
 
         if let Some(base_path) = base_url.strip_prefix("file://") {
@@ -191,7 +246,8 @@ impl MySqlAppRepository {
 
         if let Ok(parsed) = reqwest::Url::parse(base_url) {
             if let Ok(next) = parsed.join(href) {
-                return Some(next.to_string());
+                let candidate = next.to_string();
+                return if Self::is_allowed_intranet_url(&candidate) { Some(candidate) } else { None };
             }
         }
 
@@ -816,8 +872,8 @@ impl AppRepository for MySqlAppRepository {
     }
 
     async fn list_patient_revisions(&self, patient_id: i64) -> Result<Vec<RevisionTimelineDto>, ApiError> {
-        let rows = sqlx::query_as::<_, (i64, String, String, String, String, String, String)>(
-            "SELECT pr.id, pr.entity_type, pr.diff_before, pr.diff_after, pr.reason_for_change, u.username, DATE_FORMAT(pr.created_at, '%Y-%m-%d %H:%i:%s')
+        let rows = sqlx::query_as::<_, (i64, String, String, Option<String>, String, Option<String>, String, String, String)>(
+            "SELECT pr.id, pr.entity_type, pr.diff_before, pr.diff_before_cipher, pr.diff_after, pr.diff_after_cipher, pr.reason_for_change, u.username, DATE_FORMAT(pr.created_at, '%Y-%m-%d %H:%i:%s')
              FROM patient_revisions pr
              JOIN users u ON u.id = pr.actor_id
              WHERE pr.patient_id = ?
@@ -827,19 +883,31 @@ impl AppRepository for MySqlAppRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| RevisionTimelineDto {
+        let mut result = Vec::with_capacity(rows.len());
+        for r in rows {
+            // Prefer encrypted cipher columns; fall back to plaintext for pre-migration rows
+            let diff_before = if let Some(ref cipher) = r.3 {
+                self.field_crypto.decrypt(cipher).unwrap_or_else(|_| r.2.clone())
+            } else {
+                r.2
+            };
+            let diff_after = if let Some(ref cipher) = r.5 {
+                self.field_crypto.decrypt(cipher).unwrap_or_else(|_| r.4.clone())
+            } else {
+                r.4
+            };
+            result.push(RevisionTimelineDto {
                 id: r.0,
                 entity_type: r.1,
-                diff_before: r.2,
-                diff_after: r.3,
+                diff_before,
+                diff_after,
                 field_deltas_json: String::new(),
-                reason_for_change: r.4,
-                actor_username: r.5,
-                created_at: r.6,
-            })
-            .collect())
+                reason_for_change: r.6,
+                actor_username: r.7,
+                created_at: r.8,
+            });
+        }
+        Ok(result)
     }
 
     async fn create_patient_revision(
@@ -851,14 +919,19 @@ impl AppRepository for MySqlAppRepository {
         reason: &str,
         actor_id: i64,
     ) -> Result<(), ApiError> {
+        let before_cipher = self.field_crypto.encrypt(before_json)?;
+        let after_cipher = self.field_crypto.encrypt(after_json)?;
         sqlx::query(
-            "INSERT INTO patient_revisions (patient_id, entity_type, diff_before, diff_after, reason_for_change, actor_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, NOW())",
+            "INSERT INTO patient_revisions (patient_id, entity_type, diff_before, diff_before_cipher, diff_after, diff_after_cipher, encryption_key_version, reason_for_change, actor_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())",
         )
         .bind(patient_id)
         .bind(entity_type)
-        .bind(before_json)
-        .bind(after_json)
+        .bind("[ENCRYPTED]")
+        .bind(&before_cipher)
+        .bind("[ENCRYPTED]")
+        .bind(&after_cipher)
+        .bind(self.field_crypto.active_key_version())
         .bind(reason)
         .bind(actor_id)
         .execute(&self.pool)
@@ -988,21 +1061,56 @@ impl AppRepository for MySqlAppRepository {
         to_state: Option<&str>,
         actor_id: i64,
         note: &str,
+        patient_id: Option<i64>,
     ) -> Result<(), ApiError> {
         sqlx::query(
-            "INSERT INTO bed_events (action_type, from_bed_id, to_bed_id, from_state, to_state, actor_id, note, occurred_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, NOW())",
+            "INSERT INTO bed_events (action_type, from_bed_id, to_bed_id, from_state, to_state, patient_id, actor_id, note, occurred_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())",
         )
         .bind(action)
         .bind(from_bed_id)
         .bind(to_bed_id)
         .bind(from_state)
         .bind(to_state)
+        .bind(patient_id)
         .bind(actor_id)
         .bind(note)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn check_in_patient(&self, bed_id: i64, patient_id: i64) -> Result<(), ApiError> {
+        sqlx::query(
+            "INSERT INTO bed_occupancies (bed_id, patient_id, checked_in_at) VALUES (?, ?, NOW())",
+        )
+        .bind(bed_id)
+        .bind(patient_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn check_out_patient(&self, bed_id: i64, reason: &str) -> Result<(), ApiError> {
+        sqlx::query(
+            "UPDATE bed_occupancies SET checked_out_at = NOW(), checked_out_reason = ?
+             WHERE bed_id = ? AND checked_out_at IS NULL",
+        )
+        .bind(reason)
+        .bind(bed_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn active_bed_occupant(&self, bed_id: i64) -> Result<Option<i64>, ApiError> {
+        let row = sqlx::query_scalar::<_, i64>(
+            "SELECT patient_id FROM bed_occupancies WHERE bed_id = ? AND checked_out_at IS NULL LIMIT 1",
+        )
+        .bind(bed_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
     }
 
     async fn list_bed_events(&self) -> Result<Vec<BedEventDto>, ApiError> {
@@ -1281,11 +1389,19 @@ impl AppRepository for MySqlAppRepository {
         details_json: &str,
         actor_id: i64,
     ) -> Result<(), ApiError> {
+        // Use a serialized transaction to prevent concurrent callers from
+        // reading the same MAX(event_seq) and producing duplicate sequence
+        // numbers or a broken hash chain.
+        let mut tx = self.pool.begin().await.map_err(|_| ApiError::Internal)?;
+
+        // Lock the latest row to serialize concurrent appends.
         let last = sqlx::query_as::<_, (Option<i64>, Option<String>)>(
-            "SELECT MAX(event_seq), (SELECT entry_hash FROM audit_logs ORDER BY event_seq DESC LIMIT 1) FROM audit_logs",
+            "SELECT event_seq, entry_hash FROM audit_logs ORDER BY event_seq DESC LIMIT 1 FOR UPDATE",
         )
-        .fetch_one(&self.pool)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or((None, None));
+
         let next_seq = last.0.unwrap_or(0) + 1;
         let prev_hash = last.1.unwrap_or_default();
         let payload = format!(
@@ -1307,10 +1423,12 @@ impl AppRepository for MySqlAppRepository {
         .bind(entity_id)
         .bind(details_json)
         .bind(actor_id)
-        .bind(prev_hash)
-        .bind(entry_hash)
-        .execute(&self.pool)
+        .bind(&prev_hash)
+        .bind(&entry_hash)
+        .execute(&mut *tx)
         .await?;
+
+        tx.commit().await.map_err(|_| ApiError::Internal)?;
         Ok(())
     }
 
