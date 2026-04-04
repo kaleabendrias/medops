@@ -29,7 +29,7 @@ pass_case() {
 }
 
 mysql_query() {
-  docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "$1"
+  docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "$1" 2>/dev/null
 }
 
 login_response() {
@@ -280,7 +280,7 @@ assert_code "attachment_size_constraint" "413" "$oversize_code"
 
 python3 - <<'PY'
 with open('/tmp/binary-attachment.pdf', 'wb') as f:
-    payload = bytes([0, 1, 2, 3, 10, 13, 255, 128, 64, 32]) + b'BINARY-CONTENT' + bytes(range(16))
+    payload = b'%PDF-1.4 ' + bytes([0, 1, 2, 3, 10, 13, 255, 128, 64, 32]) + b'BINARY-CONTENT' + bytes(range(16))
     f.write(payload)
 PY
 binary_upload_code=$(curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X POST "$API_BASE/patients/$patient_id/attachments?filename=binary-roundtrip.pdf&mime_type=application/pdf" -H "X-Session-Token: $admin_token" --data-binary @/tmp/binary-attachment.pdf)
@@ -352,10 +352,10 @@ print(mapping.get(state, "Available"))
 PY
 )
 
-code=$(api_call "POST" "/bedboard/beds/$bed_id/transition" "$admin_token" "{\"action\":\"check-in\",\"target_state\":\"$legal_target\",\"related_bed_id\":null,\"note\":\"legal transition test\"}")
+code=$(api_call "POST" "/bedboard/beds/$bed_id/transition" "$admin_token" "{\"action\":\"transition\",\"target_state\":\"$legal_target\",\"related_bed_id\":null,\"note\":\"legal transition test\"}")
 assert_code "bed_state_machine_legal_transition" "200" "$code"
 
-code=$(api_call "POST" "/bedboard/beds/$bed_id/transition" "$admin_token" '{"action":"check-in","target_state":"NotAState","related_bed_id":null,"note":"illegal transition test"}')
+code=$(api_call "POST" "/bedboard/beds/$bed_id/transition" "$admin_token" '{"action":"transition","target_state":"NotAState","related_bed_id":null,"note":"illegal transition test"}')
 assert_code "bed_state_machine_illegal_transition" "400" "$code"
 
 code=$(api_call "POST" "/cafeteria/dishes" "$admin_token" '{"category_id":1,"name":"Campaign Meal","description":"campaign dish","base_price_cents":1200,"photo_path":"/tmp/campaign.jpg"}')
@@ -373,13 +373,13 @@ campaign_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.
 
 code=$(api_call "POST" "/campaigns/$campaign_id/join" "$admin_token")
 assert_code "campaign_join_admin" "200" "$code"
-code=$(api_call "POST" "/campaigns/$campaign_id/join" "$cafeteria_token")
-assert_code "campaign_join_cafeteria" "200" "$code"
+code=$(api_call "POST" "/campaigns/$campaign_id/join" "$member_token")
+assert_code "campaign_join_member" "200" "$code"
 
 code=$(api_call "POST" "/orders" "$admin_token" "{\"patient_id\":$patient_id,\"menu_id\":$campaign_menu_id,\"notes\":\"campaign-order-admin\"}")
 assert_code "campaign_qualifying_order_admin" "200" "$code"
-code=$(api_call "POST" "/orders" "$cafeteria_token" "{\"patient_id\":$patient_id,\"menu_id\":$campaign_menu_id,\"notes\":\"campaign-order-cafeteria\"}")
-assert_code "campaign_qualifying_order_cafeteria" "200" "$code"
+code=$(api_call "POST" "/orders" "$member_token" "{\"patient_id\":$patient_id,\"menu_id\":$campaign_menu_id,\"notes\":\"campaign-order-member\"}")
+assert_code "campaign_qualifying_order_member" "200" "$code"
 
 code=$(api_call "GET" "/campaigns" "$admin_token")
 assert_code "campaign_success_refresh" "200" "$code"
@@ -741,7 +741,7 @@ ssrf_task_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body
 code=$(api_call "POST" "/ingestion/tasks/$ssrf_task_id/run" "$admin_token" '')
 assert_code "ingestion_run_external_url_rejected" "200" "$code"
 sleep 2
-ssrf_run_status=$(docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "SELECT status FROM ingestion_task_runs WHERE task_id = $ssrf_task_id ORDER BY id DESC LIMIT 1;")
+ssrf_run_status=$(docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "SELECT status FROM ingestion_task_runs WHERE task_id = $ssrf_task_id ORDER BY id DESC LIMIT 1;" 2>/dev/null)
 if [ "$ssrf_run_status" != "failed" ]; then
   fail_case "ingestion_ssrf_blocked" "expected external URL ingestion to fail, got status: $ssrf_run_status"
 fi

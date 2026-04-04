@@ -28,7 +28,7 @@ pass_case() {
 }
 
 mysql_query() {
-  docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "$1"
+  docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "$1" 2>/dev/null
 }
 
 login_token() {
