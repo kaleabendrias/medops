@@ -949,15 +949,14 @@ impl AppRepository for MySqlAppRepository {
         uploaded_by: i64,
     ) -> Result<(), ApiError> {
         sqlx::query(
-            "INSERT INTO patient_attachments (patient_id, file_name, mime_type, file_size_bytes, payload_blob, storage_path, uploaded_by, uploaded_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, NOW())",
+            "INSERT INTO patient_attachments (patient_id, file_name, mime_type, file_size_bytes, payload_blob, uploaded_by, uploaded_at)
+             VALUES (?, ?, ?, ?, ?, ?, NOW())",
         )
         .bind(patient_id)
         .bind(file_name)
         .bind(mime_type)
         .bind(file_size_bytes)
         .bind(payload_bytes)
-        .bind("")
         .bind(uploaded_by)
         .execute(&self.pool)
         .await?;
@@ -994,8 +993,8 @@ impl AppRepository for MySqlAppRepository {
         patient_id: i64,
         attachment_id: i64,
     ) -> Result<Option<AttachmentStorageRecord>, ApiError> {
-        let row = sqlx::query_as::<_, (String, Option<Vec<u8>>, String)>(
-            "SELECT mime_type, payload_blob, storage_path
+        let row = sqlx::query_as::<_, (String, Vec<u8>)>(
+            "SELECT mime_type, payload_blob
              FROM patient_attachments
              WHERE id = ? AND patient_id = ?",
         )
@@ -1003,10 +1002,9 @@ impl AppRepository for MySqlAppRepository {
         .bind(patient_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|(mime_type, payload_bytes, legacy_storage_path)| AttachmentStorageRecord {
+        Ok(row.map(|(mime_type, payload_bytes)| AttachmentStorageRecord {
             mime_type,
             payload_bytes,
-            legacy_storage_path,
         }))
     }
 
@@ -1277,10 +1275,26 @@ impl AppRepository for MySqlAppRepository {
     async fn list_orders(&self, user_id: i64, role_name: &str, limit: i64, offset: i64) -> Result<Vec<OrderDto>, ApiError> {
         let safe_limit = limit.clamp(1, 200);
         let safe_offset = offset.max(0);
+        let has_self_service = self
+            .user_has_permission(role_name, "order.self_service")
+            .await?;
         let rows = if Self::role_has_global_order_access(role_name) {
             sqlx::query_as::<_, (i64, i64, i64, String, String, i32)>(
                 "SELECT id, patient_id, menu_id, status, notes, version FROM dining_orders ORDER BY id DESC LIMIT ? OFFSET ?",
             )
+            .bind(safe_limit)
+            .bind(safe_offset)
+            .fetch_all(&self.pool)
+            .await?
+        } else if has_self_service {
+            // Self-service users only see orders they created themselves.
+            sqlx::query_as::<_, (i64, i64, i64, String, String, i32)>(
+                "SELECT id, patient_id, menu_id, status, notes, version
+                 FROM dining_orders
+                 WHERE created_by = ?
+                 ORDER BY id DESC LIMIT ? OFFSET ?",
+            )
+            .bind(user_id)
             .bind(safe_limit)
             .bind(safe_offset)
             .fetch_all(&self.pool)

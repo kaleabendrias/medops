@@ -8,9 +8,9 @@ ON DUPLICATE KEY UPDATE description = VALUES(description);
 
 INSERT INTO hospitals (code, name, city, country, status)
 VALUES
-  ('HSP-AMS-001', 'Amsterdam Central Hospital', 'Amsterdam', 'Netherlands', 'active'),
-  ('HSP-BER-002', 'Berlin Care Institute', 'Berlin', 'Germany', 'active'),
-  ('HSP-LON-003', 'London West Medical Center', 'London', 'United Kingdom', 'active')
+  ('HSP-NYC-001', 'Manhattan General Hospital', 'New York', 'United States', 'active'),
+  ('HSP-CHI-002', 'Lakeshore Medical Center', 'Chicago', 'United States', 'active'),
+  ('HSP-HOU-003', 'Texas Medical Institute', 'Houston', 'United States', 'active')
 ON DUPLICATE KEY UPDATE
   name = VALUES(name),
   city = VALUES(city),

@@ -136,6 +136,7 @@ if [ "$member_disabled" != "0" ]; then
   fail_case "admin_disable_cleanup_reenable" "failed to restore member1 active state"
 fi
 pass_case "admin_disable_cleanup_reenable" "restored member1 active state for downstream suites"
+member_token=$(login_token "member1" "Admin#OfflinePass123")
 
 patient_payload="{\"mrn\":\"MRN-T001-$RUN_ID\",\"first_name\":\"Test\",\"last_name\":\"Patient\",\"birth_date\":\"1990-01-01\",\"gender\":\"F\",\"phone\":\"555-1111\",\"email\":\"test.patient+$RUN_ID@example.local\",\"allergies\":\"none\",\"contraindications\":\"none\",\"history\":\"baseline\"}"
 code=$(api_call "POST" "/patients" "$admin_token" "$patient_payload")
@@ -321,20 +322,19 @@ if [ "$payload_size" -le 0 ]; then
 fi
 pass_case "attachment_binary_persisted_in_mysql" "attachment payload stored in MySQL blob"
 
-docker compose exec -T api sh -c 'mkdir -p /var/lib/rocket-api/uploads/legacy-tests && printf "LEGACY-BLOB" > /var/lib/rocket-api/uploads/legacy-tests/legacy-attachment.txt' >/dev/null
-mysql_query "INSERT INTO patient_attachments (patient_id, file_name, mime_type, file_size_bytes, payload_blob, storage_path, uploaded_by, uploaded_at) VALUES ($patient_id, 'legacy-attachment.txt', 'application/pdf', 11, NULL, '/var/lib/rocket-api/uploads/legacy-tests/legacy-attachment.txt', 1, NOW());"
-legacy_attachment_id=$(mysql_query "SELECT id FROM patient_attachments WHERE patient_id = $patient_id AND file_name = 'legacy-attachment.txt' ORDER BY id DESC LIMIT 1;")
-legacy_download_code=$(curl -s -o /tmp/legacy-download.txt -w "%{http_code}" -X GET "$API_BASE/patients/$patient_id/attachments/$legacy_attachment_id/download" -H "X-Session-Token: $admin_token")
-assert_code "attachment_legacy_fallback_download" "200" "$legacy_download_code"
-legacy_content=$(python3 - <<'PY'
-with open('/tmp/legacy-download.txt', 'rb') as f:
-    print(f.read().decode('utf-8', errors='ignore'))
-PY
-)
-if [ "$legacy_content" != "LEGACY-BLOB" ]; then
-  fail_case "attachment_legacy_fallback_download" "legacy filesystem fallback payload mismatch"
+# Verify storage_path column no longer exists (BLOB-only authority)
+storage_path_col=$(mysql_query "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='hospital_platform' AND table_name='patient_attachments' AND column_name='storage_path';")
+if [ "$storage_path_col" != "0" ]; then
+  fail_case "attachment_blob_only_authority" "storage_path column still exists; expected MySQL BLOB-only storage"
 fi
-pass_case "attachment_legacy_fallback_download" "legacy attachment rows fallback to storage_path when blob is missing"
+pass_case "attachment_blob_only_authority" "attachment storage is MySQL BLOB-only; no filesystem fallback"
+
+# Verify payload_blob is NOT NULL (all rows must have BLOB data)
+nullable=$(mysql_query "SELECT IS_NULLABLE FROM information_schema.columns WHERE table_schema='hospital_platform' AND table_name='patient_attachments' AND column_name='payload_blob';")
+if [ "$nullable" != "NO" ]; then
+  fail_case "attachment_blob_not_null" "payload_blob should be NOT NULL"
+fi
+pass_case "attachment_blob_not_null" "payload_blob column enforces NOT NULL constraint"
 
 beds_json=$(curl -s -X GET "$API_BASE/bedboard/beds" -H "X-Session-Token: $admin_token")
 bed_id=$(python3 -c 'import sys,json; data=json.load(sys.stdin); print(data[0]["id"])' <<<"$beds_json")
@@ -473,6 +473,49 @@ code=$(api_call "POST" "/orders/$isolated_order_id/ticket-splits" "$clinical_tok
 assert_code "ticket_split_cross_user_forbidden" "403" "$code"
 code=$(api_call "GET" "/orders/$isolated_order_id/ticket-splits" "$clinical_token")
 assert_code "ticket_splits_cross_user_forbidden" "403" "$code"
+
+# ── Member cross-patient order isolation (object-level authz) ──
+# Member creates an order (self-service), then tries to access admin-created orders.
+# All cross-user access must be denied to prevent ID enumeration attacks.
+code=$(api_call "POST" "/orders" "$member_token" "{\"patient_id\":$patient_id,\"menu_id\":$menu_id,\"notes\":\"member-own-order\"}")
+assert_code "member_self_service_order_create" "200" "$code"
+member_own_order_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.json")))')
+
+# Member must NOT read orders created by admin
+code=$(api_call "GET" "/orders/$isolated_order_id/notes" "$member_token")
+assert_code "member_cross_patient_read_notes_forbidden" "403" "$code"
+code=$(api_call "GET" "/orders/$isolated_order_id/ticket-splits" "$member_token")
+assert_code "member_cross_patient_read_splits_forbidden" "403" "$code"
+
+# Member must NOT mutate orders created by admin
+code=$(api_call "PUT" "/orders/$isolated_order_id/status" "$member_token" '{"status":"Canceled","reason":"unauthorized attempt"}')
+assert_code "member_cross_patient_status_update_forbidden" "403" "$code"
+code=$(api_call "POST" "/orders/$isolated_order_id/notes" "$member_token" '{"note":"unauthorized note"}')
+assert_code "member_cross_patient_add_note_forbidden" "403" "$code"
+code=$(api_call "POST" "/orders/$isolated_order_id/ticket-splits" "$member_token" '{"split_by":"ward","split_value":"X","quantity":1}')
+assert_code "member_cross_patient_add_split_forbidden" "403" "$code"
+
+# Member CAN access their own order (positive check)
+code=$(api_call "POST" "/orders/$member_own_order_id/notes" "$member_token" '{"note":"my own note"}')
+assert_code "member_own_order_add_note_allowed" "200" "$code"
+code=$(api_call "GET" "/orders/$member_own_order_id/notes" "$member_token")
+assert_code "member_own_order_read_notes_allowed" "200" "$code"
+
+# Member list_orders must NOT include admin-created orders
+code=$(api_call "GET" "/orders" "$member_token")
+assert_code "member_list_orders_scoped" "200" "$code"
+member_sees_admin_order=$(python3 - <<PY
+import json
+admin_order = $isolated_order_id
+with open('/tmp/api_test_body.json') as f:
+    rows = json.load(f)
+print('1' if any(x.get('id') == admin_order for x in rows) else '0')
+PY
+)
+if [ "$member_sees_admin_order" != "0" ]; then
+  fail_case "member_order_list_isolation" "member list_orders leaked admin-created order $isolated_order_id"
+fi
+pass_case "member_order_list_isolation" "member order listing is scoped to own orders only"
 
 code=$(api_call "PUT" "/orders/$order_id/status" "$admin_token" '{"status":"Billed"}')
 assert_code "order_status_billed" "200" "$code"
@@ -923,6 +966,57 @@ if [ "$funnel_ok" != "1" ]; then
   fail_case "funnel_metrics_shape" "funnel metrics missing required steps or invalid values"
 fi
 pass_case "funnel_metrics_shape" "funnel metrics include expected steps"
+
+# ── Retention API contract tests ──
+code=$(api_call "GET" "/retention" "$admin_token")
+assert_code "retention_settings_accessible" "200" "$code"
+retention_keys=$(python3 - <<'PY'
+import json
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+keys = sorted(data.keys())
+print(','.join(keys))
+PY
+)
+if [ "$retention_keys" != "audit_log_days,patient_record_days,session_days" ]; then
+  fail_case "retention_settings_shape" "expected audit_log_days, patient_record_days, session_days; got $retention_keys"
+fi
+pass_case "retention_settings_shape" "retention settings returns expected fields"
+
+code=$(api_call "GET" "/retention/policies" "$admin_token")
+assert_code "retention_policies_list" "200" "$code"
+
+code=$(api_call "PUT" "/retention/policies/clinical_records/7" "$admin_token")
+assert_code "retention_policy_upsert" "200" "$code"
+
+code=$(api_call "PUT" "/retention/policies/clinical_records/3" "$admin_token")
+assert_code "retention_policy_floor_enforced" "400" "$code"
+
+code=$(api_call "GET" "/retention/policies" "$member_token")
+assert_code "retention_policies_deny_member" "403" "$code"
+
+code=$(api_call "GET" "/analytics/retention" "$admin_token")
+assert_code "analytics_retention_cohorts" "200" "$code"
+
+# ── Autonomous campaign closure via MySQL event ──
+event_count=$(mysql_query "SELECT COUNT(*) FROM information_schema.events WHERE event_schema='hospital_platform' AND event_name='evt_close_inactive_campaigns';")
+if [ "$event_count" != "1" ]; then
+  fail_case "campaign_auto_close_event_exists" "expected MySQL event evt_close_inactive_campaigns, got count=$event_count"
+fi
+pass_case "campaign_auto_close_event_exists" "autonomous campaign closure event is scheduled in MySQL"
+
+event_status=$(mysql_query "SELECT STATUS FROM information_schema.events WHERE event_schema='hospital_platform' AND event_name='evt_close_inactive_campaigns';")
+if [ "$event_status" != "ENABLED" ]; then
+  fail_case "campaign_auto_close_event_enabled" "expected event ENABLED, got $event_status"
+fi
+pass_case "campaign_auto_close_event_enabled" "campaign closure event is active"
+
+# ── BLOB-only storage: no filesystem column ──
+blob_col_type=$(mysql_query "SELECT COLUMN_TYPE FROM information_schema.columns WHERE table_schema='hospital_platform' AND table_name='patient_attachments' AND column_name='payload_blob';")
+if [[ "$blob_col_type" != *"longblob"* ]]; then
+  fail_case "attachment_blob_column_type" "expected longblob, got $blob_col_type"
+fi
+pass_case "attachment_blob_column_type" "attachment payload stored as LONGBLOB in MySQL"
 
 cat >"$REPORT_DIR/api_integration_tests.json" <<EOF
 {"suite":"api_integration_tests","status":"pass"}

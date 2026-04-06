@@ -1,86 +1,71 @@
-# Questions and Clarifications
+# Required Document Description: Business Logic Questions Log
 
-This file records implementation-time clarifications and decisions as reflected in the current codebase.
+## 1. Authoritative runtime path for full verification
+Question: Is full-stack verification expected to run natively or containerized?
 
-## Q1: What is the authoritative runtime path for full verification?
-- Question:
-Is full-stack verification expected to run natively or containerized?
-- Context:
-The stack has API, web, seeded data, migrations, and cross-role integration checks.
-- Resolution:
-Containerized verification is authoritative. Non-Docker frontend checks are supported as a secondary path for local frontend iteration.
+My Understanding: Containerized verification should be the authoritative path for full-system acceptance, while non-Docker frontend checks remain useful for local iteration.
 
-## Q2: What is the session and authentication model?
-- Question:
-How should authentication be enforced for an offline intranet deployment?
-- Context:
-The prompt requires username/password, lockout policy, and inactivity expiry.
-- Resolution:
-Session token based authentication is used with X-Session-Token header. Offline-only policy is enforced in configuration and startup checks. Password policy, lockout thresholds, and inactivity timeout are server-configured.
+Solution: Defined Docker-based verification as primary and retained native frontend checks as a secondary developer workflow.
 
-## Q3: Where is authorization enforced?
-- Question:
-Should role checks happen only in frontend navigation or also in API services?
-- Context:
-Frontend can hide routes, but secure enforcement requires backend checks.
-- Resolution:
-Authorization is layered: frontend menu entitlements govern page visibility, while backend permission and object-level checks remain authoritative.
+## 2. Session and authentication model for offline intranet
+Question: How should authentication be enforced for an offline intranet deployment?
 
-## Q4: How are sensitive clinical fields handled?
-- Question:
-How should allergy/contraindication/history and identifier-like fields be protected?
-- Context:
-Prompt requires encrypted-at-rest handling and masked display by default.
-- Resolution:
-Application-level encryption is used server-side for sensitive fields with role-aware reveal controls. Frontend defaults to masked sensitive values unless reveal is permitted.
+My Understanding: Authentication must enforce session security plus policy controls (password complexity, lockout, inactivity timeout) under an offline-only operating mode.
 
-## Q5: Are reason-for-change semantics mandatory for clinical edits?
-- Question:
-Do demographics and clinical updates require a non-empty change reason?
-- Context:
-Clinical traceability requires revision context.
-- Resolution:
-Reason-for-change is treated as required in update workflows and revision timeline outputs.
+Solution: Implemented session-token authentication via the X-Session-Token header, with startup/config enforcement for offline mode, lockout thresholds, password rules, and inactivity expiry.
 
-## Q6: How should attachment uploads be constrained?
-- Question:
-What validations are mandatory for patient attachment uploads?
-- Context:
-Prompt specifies file types and per-file size constraints.
-- Resolution:
-Only PDF/JPG/PNG with matching MIME types are accepted, and per-file size is limited to 25 MB.
+## 3. Authorization enforcement location
+Question: Should role checks happen only in frontend navigation or also in API services?
 
-## Q7: What bedboard lifecycle model is supported?
-- Question:
-Should bed transitions be treated as free-form updates or constrained state-machine actions?
-- Context:
-Operational integrity requires legal transition checks and auditability.
-- Resolution:
-Bed transitions are validated by legal state rules and recorded as operational events with actor and timeline details.
+My Understanding: Frontend visibility controls are not sufficient for security; backend authorization and object-level checks must be authoritative.
 
-## Q8: How are campaign completion and closure handled?
-- Question:
-How does the platform determine campaign success versus closure due to inactivity or deadline?
-- Context:
-Prompt requires threshold-based success and auto-close inactivity behavior.
-- Resolution:
-Campaign status is recomputed by backend logic using qualifying orders, deadlines, and inactivity closure conditions.
+Solution: Applied layered authorization where menu entitlements control page visibility and backend permission/object checks enforce access.
 
-## Q9: What is the intended behavior for ingestion task lifecycle?
-- Question:
-Are ingestion tasks one-shot jobs or managed assets with versions and rollback?
-- Context:
-Prompt calls for strategy configuration, scheduling, and rollback.
-- Resolution:
-Tasks are managed entities with create, update, run, version history, and rollback operations.
+## 4. Sensitive clinical field protection
+Question: How should allergy/contraindication/history and identifier-like fields be protected?
 
-## Q10: What is the testing expectation for acceptance confidence?
-- Question:
-Which test layers are expected for delivery confidence?
-- Context:
-The stack includes backend, frontend, integration, authorization matrix, browser checks, and smoke tests.
-- Resolution:
-Acceptance confidence is based on multi-layer checks: unit tests, API integration, role matrix validation, browser checks, and smoke workflow scripts.
+My Understanding: Sensitive fields require encrypted-at-rest treatment and masked-by-default display, with limited reveal capability by role.
 
-## Notes
-- This document reflects currently implemented behavior and may be updated when requirements or policies change.
+Solution: Added server-side application encryption for sensitive data and role-aware reveal controls, while keeping frontend default rendering masked.
+
+## 5. Reason-for-change requirement for clinical edits
+Question: Do demographics and clinical updates require a non-empty change reason?
+
+My Understanding: Clinical traceability requires a mandatory reason to support revision integrity and audit context.
+
+Solution: Enforced reason-for-change in update workflows and exposed it in revision timeline outputs.
+
+## 6. Attachment upload constraints
+Question: What validations are mandatory for patient attachment uploads?
+
+My Understanding: Upload validation must enforce both file type/MIME correctness and a strict per-file size limit.
+
+Solution: Restricted uploads to PDF/JPG/PNG with matching MIME types and capped each file at 25 MB.
+
+## 7. Bedboard lifecycle model
+Question: Should bed transitions be treated as free-form updates or constrained state-machine actions?
+
+My Understanding: Bed movement should follow legal transition rules to preserve operational integrity and auditable history.
+
+Solution: Implemented legal-state validation for transitions and recorded bed events with actor and timeline details.
+
+## 8. Campaign completion and closure logic
+Question: How does the platform determine campaign success versus closure due to inactivity or deadline?
+
+My Understanding: Campaign outcomes should be backend-derived using qualifying order totals, configured thresholds, inactivity windows, and deadlines.
+
+Solution: Implemented status recomputation logic that evaluates success conditions and auto-closes campaigns when inactivity/deadline criteria are met.
+
+# 9. Ingestion task lifecycle behavior
+Question: Are ingestion tasks one-shot jobs or managed assets with versions and rollback?
+
+My Understanding: Ingestion should be a managed lifecycle with durable history, repeatable execution, and rollback support.
+
+Solution: Implemented task entities with create/update/run flows plus version history and rollback operations.
+
+# 10. Testing expectations for acceptance confidence
+Question: Which test layers are expected for delivery confidence?
+
+My Understanding: Acceptance confidence requires multiple complementary layers, not only unit testing.
+
+Solution: Adopted multi-layer coverage through backend/frontend unit tests, API integration tests, role authorization matrix checks, browser checks, and smoke workflows.

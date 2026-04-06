@@ -165,6 +165,40 @@ code=$(status_for "$cafeteria_token" "GET" "/patients/$patient_id/export?format=
 [ "$code" = "403" ] || fail_case "patient_export_deny_cafeteria" "expected 403 got $code"
 pass_case "patient_export_deny_cafeteria" "cafeteria user denied patient export workflow"
 
+# ── Member order isolation: cross-patient access denied ──
+# Create a patient and an order as admin, then verify member cannot access it.
+auth_matrix_patient_id=$(mysql_query "SELECT id FROM patients ORDER BY id ASC LIMIT 1;")
+if [ -n "$auth_matrix_patient_id" ]; then
+  menu_id=$(mysql_query "SELECT id FROM dining_menus ORDER BY id ASC LIMIT 1;")
+  if [ -n "$menu_id" ]; then
+    # Admin creates an order
+    admin_order_code=$(curl -s -o /tmp/auth_matrix_body.txt -w "%{http_code}" -X POST "$API_BASE/orders" -H "X-Session-Token: $admin_token" -H "Content-Type: application/json" -d "{\"patient_id\":$auth_matrix_patient_id,\"menu_id\":$menu_id,\"notes\":\"matrix isolation test\"}")
+    if [ "$admin_order_code" = "200" ]; then
+      admin_order_id=$(python3 -c 'import json; print(json.load(open("/tmp/auth_matrix_body.txt")))')
+
+      # Member must NOT read admin's order notes
+      code=$(status_for "$member_token" "GET" "/orders/$admin_order_id/notes")
+      [ "$code" = "403" ] || fail_case "member_cross_order_read_denied" "expected 403 got $code"
+      pass_case "member_cross_order_read_denied" "member cannot read another user's order notes"
+
+      # Member must NOT update admin's order status
+      code=$(curl -s -o /tmp/auth_matrix_body.txt -w "%{http_code}" -X PUT "$API_BASE/orders/$admin_order_id/status" -H "X-Session-Token: $member_token" -H "Content-Type: application/json" -d '{"status":"Canceled","reason":"unauthorized"}')
+      [ "$code" = "403" ] || fail_case "member_cross_order_mutate_denied" "expected 403 got $code"
+      pass_case "member_cross_order_mutate_denied" "member cannot mutate another user's order"
+
+      # Member must NOT add notes to admin's order
+      code=$(curl -s -o /tmp/auth_matrix_body.txt -w "%{http_code}" -X POST "$API_BASE/orders/$admin_order_id/notes" -H "X-Session-Token: $member_token" -H "Content-Type: application/json" -d '{"note":"unauthorized"}')
+      [ "$code" = "403" ] || fail_case "member_cross_order_note_denied" "expected 403 got $code"
+      pass_case "member_cross_order_note_denied" "member cannot add notes to another user's order"
+
+      # Member must NOT add ticket splits to admin's order
+      code=$(curl -s -o /tmp/auth_matrix_body.txt -w "%{http_code}" -X POST "$API_BASE/orders/$admin_order_id/ticket-splits" -H "X-Session-Token: $member_token" -H "Content-Type: application/json" -d '{"split_by":"ward","split_value":"X","quantity":1}')
+      [ "$code" = "403" ] || fail_case "member_cross_order_split_denied" "expected 403 got $code"
+      pass_case "member_cross_order_split_denied" "member cannot add splits to another user's order"
+    fi
+  fi
+fi
+
 admin_orders_menu=$(menu_allowed "$admin_token" "orders")
 member_orders_menu=$(menu_allowed "$member_token" "orders")
 code=$(status_for "$admin_token" "GET" "/orders")
@@ -206,5 +240,5 @@ fi
 pass_case "menu_route_service_consistency_member_ingestion" "member ingestion entitlement aligns with route and service"
 
 cat >"$REPORT_DIR/authorization_matrix.json" <<EOF
-{"suite":"authorization_matrix","status":"pass","cases":24}
+{"suite":"authorization_matrix","status":"pass","cases":28}
 EOF

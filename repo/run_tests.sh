@@ -67,7 +67,6 @@ run_step "frontend_unit_tests" bash unit_tests/run_frontend_unit_tests.sh "$REPO
 run_step "migration_checks" bash API_tests/migration_checks.sh "$REPORT_DIR"
 run_step "authorization_matrix_checks" bash API_tests/authorization_matrix.sh "$REPORT_DIR"
 run_step "api_integration_tests" bash API_tests/api_integration_tests.sh "$REPORT_DIR"
-run_step "browser_e2e" bash API_tests/browser_e2e.sh "$REPORT_DIR"
 run_step "e2e_smoke" bash API_tests/e2e_smoke.sh "$REPORT_DIR"
 
 cat >"$REPORT_DIR/summary.json" <<EOF

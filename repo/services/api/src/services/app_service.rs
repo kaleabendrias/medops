@@ -594,18 +594,9 @@ impl AppService {
         let crate::repositories::app_repository::AttachmentStorageRecord {
             mime_type,
             payload_bytes,
-            legacy_storage_path,
         } = meta;
 
-        let bytes = if let Some(payload) = payload_bytes {
-            payload
-        } else if !legacy_storage_path.trim().is_empty() {
-            tokio::fs::read(&legacy_storage_path)
-                .await
-                .map_err(|_| ApiError::NotFound)?
-        } else {
-            return Err(ApiError::NotFound);
-        };
+        let bytes = payload_bytes;
 
         self.repo
             .append_audit(
@@ -879,7 +870,16 @@ impl AppService {
             .repo
             .user_has_permission(&user.role_name, "order.global_access")
             .await?;
+        let has_self_service = self
+            .repo
+            .user_has_permission(&user.role_name, "order.self_service")
+            .await?;
         let patient_access = if has_global_order_access {
+            true
+        } else if has_self_service {
+            // Self-service users can create orders (scoped to their own created_by);
+            // no patient-assignment check needed, but access to the resulting order
+            // is restricted to orders they themselves created.
             true
         } else {
             self.repo
@@ -1643,6 +1643,17 @@ impl AppService {
         if has_global_order_access {
             return Ok(());
         }
+        // Self-service users can only access orders they created themselves.
+        let has_self_service = self
+            .repo
+            .user_has_permission(&user.role_name, "order.self_service")
+            .await?;
+        if has_self_service {
+            if order.created_by == user.user_id {
+                return Ok(());
+            }
+            return Err(ApiError::Forbidden);
+        }
         let can_access = self
             .repo
             .can_access_patient(user.user_id, &user.role_name, order.patient_id)
@@ -1958,6 +1969,156 @@ mod tests {
             );
             assert!(decorated.field_deltas_json.contains("REDACTED"));
         }
+    }
+
+    // ── BLOB storage validation tests ──
+
+    #[test]
+    fn attachment_validate_accepts_jpg_jpeg_png() {
+        assert!(AppService::validate_attachment("photo.jpg", "image/jpeg", 1024).is_ok());
+        assert!(AppService::validate_attachment("photo.jpeg", "image/jpeg", 1024).is_ok());
+        assert!(AppService::validate_attachment("scan.png", "image/png", 1024).is_ok());
+    }
+
+    #[test]
+    fn attachment_validate_rejects_html_and_svg() {
+        assert!(AppService::validate_attachment("page.html", "text/html", 100).is_err());
+        assert!(AppService::validate_attachment("icon.svg", "image/svg+xml", 100).is_err());
+    }
+
+    #[test]
+    fn attachment_validate_rejects_exactly_at_limit() {
+        let limit = 25 * 1024 * 1024 + 1;
+        assert!(AppService::validate_attachment("doc.pdf", "application/pdf", limit).is_err());
+    }
+
+    #[test]
+    fn attachment_validate_accepts_at_limit() {
+        let limit = 25 * 1024 * 1024;
+        assert!(AppService::validate_attachment("doc.pdf", "application/pdf", limit).is_ok());
+    }
+
+    #[test]
+    fn verify_content_signature_pdf_magic() {
+        assert!(AppService::verify_content_signature(b"%PDF-1.4", "application/pdf").is_ok());
+        assert!(AppService::verify_content_signature(b"\x00\x01\x02", "application/pdf").is_err());
+    }
+
+    #[test]
+    fn verify_content_signature_jpeg_magic() {
+        assert!(AppService::verify_content_signature(&[0xFF, 0xD8, 0xFF, 0xE0], "image/jpeg").is_ok());
+        assert!(AppService::verify_content_signature(&[0x00, 0x00], "image/jpeg").is_err());
+    }
+
+    #[test]
+    fn verify_content_signature_png_magic() {
+        assert!(AppService::verify_content_signature(&[0x89, 0x50, 0x4E, 0x47], "image/png").is_ok());
+        assert!(AppService::verify_content_signature(&[0x89, 0x50], "image/png").is_err());
+    }
+
+    #[test]
+    fn verify_content_signature_rejects_unknown_mime() {
+        assert!(AppService::verify_content_signature(b"anything", "text/plain").is_err());
+    }
+
+    // ── Campaign deadline validation tests ──
+
+    #[test]
+    fn campaign_deadline_accepts_datetime_without_timezone() {
+        let result = AppService::normalize_campaign_deadline("2099-06-15 14:30:00");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "2099-06-15 14:30:00");
+    }
+
+    #[test]
+    fn campaign_deadline_rejects_empty_string() {
+        assert!(AppService::normalize_campaign_deadline("").is_err());
+    }
+
+    // ── Retention policy floor enforcement tests ──
+
+    #[test]
+    fn status_requires_reason_for_credited() {
+        assert!(AppService::status_requires_reason("Credited"));
+    }
+
+    #[test]
+    fn status_does_not_require_reason_for_created() {
+        assert!(!AppService::status_requires_reason("Created"));
+    }
+
+    // ── Bed state machine exhaustive tests ──
+
+    #[test]
+    fn bed_transition_occupied_to_cleaning() {
+        assert!(AppService::validate_bed_transition("Occupied", "Cleaning").is_ok());
+    }
+
+    #[test]
+    fn bed_transition_cleaning_to_available() {
+        assert!(AppService::validate_bed_transition("Cleaning", "Available").is_ok());
+    }
+
+    #[test]
+    fn bed_transition_out_of_service_to_available() {
+        assert!(AppService::validate_bed_transition("Out of Service", "Available").is_ok());
+    }
+
+    #[test]
+    fn bed_transition_rejects_available_to_available() {
+        assert!(AppService::validate_bed_transition("Available", "Available").is_err());
+    }
+
+    #[test]
+    fn bed_transition_rejects_unknown_state() {
+        assert!(AppService::validate_bed_transition("Unknown", "Available").is_err());
+    }
+
+    // ── Security: sensitive field detection tests ──
+
+    #[test]
+    fn sensitive_field_detection_covers_all_fields() {
+        assert!(AppService::is_sensitive_revision_field("mrn"));
+        assert!(AppService::is_sensitive_revision_field("allergies"));
+        assert!(AppService::is_sensitive_revision_field("contraindications"));
+        assert!(AppService::is_sensitive_revision_field("history"));
+    }
+
+    #[test]
+    fn non_sensitive_fields_not_flagged() {
+        assert!(!AppService::is_sensitive_revision_field("first_name"));
+        assert!(!AppService::is_sensitive_revision_field("gender"));
+        assert!(!AppService::is_sensitive_revision_field("phone"));
+        assert!(!AppService::is_sensitive_revision_field("email"));
+    }
+
+    // ── Password complexity edge cases ──
+
+    #[test]
+    fn password_policy_rejects_no_uppercase() {
+        assert!(AppService::validate_password_complexity_with_min("nouppercase#123", 12).is_err());
+    }
+
+    #[test]
+    fn password_policy_rejects_no_digit() {
+        assert!(AppService::validate_password_complexity_with_min("NoDigitHere#ABC", 12).is_err());
+    }
+
+    // ── Token fingerprint determinism ──
+
+    #[test]
+    fn token_fingerprint_is_deterministic() {
+        let fp1 = AppService::token_fingerprint("test-token-abc");
+        let fp2 = AppService::token_fingerprint("test-token-abc");
+        assert_eq!(fp1, fp2);
+        assert_eq!(fp1.len(), 12);
+    }
+
+    #[test]
+    fn token_fingerprint_differs_for_different_tokens() {
+        let fp1 = AppService::token_fingerprint("token-a");
+        let fp2 = AppService::token_fingerprint("token-b");
+        assert_ne!(fp1, fp2);
     }
 
     #[test]

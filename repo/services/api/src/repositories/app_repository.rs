@@ -61,8 +61,7 @@ pub struct PatientSensitiveRecord {
 #[derive(Debug, Clone)]
 pub struct AttachmentStorageRecord {
     pub mime_type: String,
-    pub payload_bytes: Option<Vec<u8>>,
-    pub legacy_storage_path: String,
+    pub payload_bytes: Vec<u8>,
 }
 
 #[async_trait]

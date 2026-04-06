@@ -1,0 +1,16 @@
+{"suite":"migration_checks","case":"migrations_applied","status":"pass","detail":"all 20 of 20 migrations applied successfully"}
+{"suite":"migration_checks","case":"latest_migration_version","status":"pass","detail":"latest migration version is 20"}
+{"suite":"migration_checks","case":"password_hash_column_size","status":"pass","detail":"users.password_hash supports Argon2id payloads"}
+{"suite":"migration_checks","case":"seed_users_present","status":"pass","detail":"seeded users present"}
+{"suite":"migration_checks","case":"campaign_deadline_schema","status":"pass","detail":"campaign deadline column present"}
+{"suite":"migration_checks","case":"audit_append_only_triggers","status":"pass","detail":"database-level audit immutability triggers present"}
+{"suite":"migration_checks","case":"clinical_retention_floor","status":"pass","detail":"clinical retention floor is 7 years"}
+{"suite":"migration_checks","case":"menu_entitlements_seeded","status":"pass","detail":"menu entitlements seeded"}
+{"suite":"migration_checks","case":"ingestion_schema_present","status":"pass","detail":"ingestion task manager tables are present"}
+{"suite":"migration_checks","case":"patient_assignment_schema_present","status":"pass","detail":"patient assignment table present"}
+{"suite":"migration_checks","case":"attachment_payload_mysql_authority_schema","status":"pass","detail":"patient attachment payload column present"}
+{"suite":"migration_checks","case":"order_idempotency_index_scope","status":"pass","detail":"order idempotency index scoped by user"}
+{"suite":"migration_checks","case":"blob_only_no_storage_path","status":"pass","detail":"filesystem fallback column removed"}
+{"suite":"migration_checks","case":"blob_not_null_constraint","status":"pass","detail":"payload_blob enforces NOT NULL"}
+{"suite":"migration_checks","case":"campaign_auto_close_event","status":"pass","detail":"autonomous campaign closure event present"}
+{"suite":"migration_checks","case":"us_hospital_seed_data","status":"pass","detail":"US hospital seed data present"}

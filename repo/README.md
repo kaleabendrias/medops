@@ -203,13 +203,14 @@ Implemented domains include:
 
 ### Retention API
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/retention` | Returns current retention settings snapshot (audit, session, patient record days) |
-| GET | `/api/v1/retention/policies` | Lists all retention policies from database |
-| PUT | `/api/v1/retention/policies/<key>/<years>` | Upserts a retention policy by key and minimum years |
+| Method | Path | Permission | Description |
+|--------|------|------------|-------------|
+| GET | `/api/v1/retention` | authenticated | Returns current retention settings snapshot (audit, session, patient record days) |
+| GET | `/api/v1/retention/policies` | `audit.read` | Lists all retention policies from database |
+| PUT | `/api/v1/retention/policies/<key>/<years>` | `retention.manage` | Upserts a retention policy by key and minimum years |
+| GET | `/api/v1/analytics/retention` | `audit.read` | Returns user retention cohort metrics (1-day and 7-day active users) |
 
-All retention endpoints require authentication. Policy mutation (`PUT`) requires `retention.manage` permission.
+All retention endpoints require authentication. Policy listing requires `audit.read`. Policy mutation (`PUT`) requires `retention.manage` permission and enforces a minimum of `clinical_years_min` (default 7) for clinical record policies.
 
 ## Configuration Notes
 

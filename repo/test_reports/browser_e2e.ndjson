@@ -1,0 +1,3 @@
+{"suite":"browser_e2e","case":"playwright_runtime_available","status":"pass","detail":"Playwright + Chromium ready"}
+{"suite":"browser_e2e","case":"frontend_reachable","status":"pass","detail":"frontend health endpoint responded"}
+{"suite":"browser_e2e","case":"playwright_e2e_suite","status":"fail","detail":"Playwright tests failed (exit code 1); see test_reports/playwright_results.json for details"}

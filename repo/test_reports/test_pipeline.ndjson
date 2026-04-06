@@ -1,0 +1,11 @@
+{"step":"compose_reset","status":"pass","detail":"ok"}
+{"step":"compose_build_up","status":"fail","detail":"exit_code=1"}
+{"step":"compose_build_up","status":"pass","detail":"ok"}
+{"step":"api_healthcheck","status":"pass","detail":"ok"}
+{"step":"web_healthcheck","status":"pass","detail":"ok"}
+{"step":"backend_unit_tests","status":"pass","detail":"ok"}
+{"step":"frontend_unit_tests","status":"pass","detail":"ok"}
+{"step":"migration_checks","status":"pass","detail":"ok"}
+{"step":"authorization_matrix_checks","status":"pass","detail":"ok"}
+{"step":"api_integration_tests","status":"pass","detail":"ok"}
+{"step":"e2e_smoke","status":"pass","detail":"ok"}

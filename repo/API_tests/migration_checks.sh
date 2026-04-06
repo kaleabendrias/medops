@@ -106,6 +106,34 @@ if [ "$idempotency_index" -lt 2 ]; then
 fi
 pass_case "order_idempotency_index_scope" "order idempotency index scoped by user"
 
+# Verify storage_path column removed (BLOB-only authority)
+storage_path_exists=$(mysql_query "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'hospital_platform' AND table_name = 'patient_attachments' AND column_name = 'storage_path';")
+if [ "$storage_path_exists" -ne 0 ]; then
+  fail_case "blob_only_no_storage_path" "storage_path column still exists after migration 019"
+fi
+pass_case "blob_only_no_storage_path" "filesystem fallback column removed"
+
+# Verify payload_blob is NOT NULL
+blob_nullable=$(mysql_query "SELECT IS_NULLABLE FROM information_schema.columns WHERE table_schema = 'hospital_platform' AND table_name = 'patient_attachments' AND column_name = 'payload_blob';")
+if [ "$blob_nullable" != "NO" ]; then
+  fail_case "blob_not_null_constraint" "payload_blob should be NOT NULL"
+fi
+pass_case "blob_not_null_constraint" "payload_blob enforces NOT NULL"
+
+# Verify campaign auto-close event exists
+event_exists=$(mysql_query "SELECT COUNT(*) FROM information_schema.events WHERE event_schema = 'hospital_platform' AND event_name = 'evt_close_inactive_campaigns';")
+if [ "$event_exists" -ne 1 ]; then
+  fail_case "campaign_auto_close_event" "evt_close_inactive_campaigns event missing"
+fi
+pass_case "campaign_auto_close_event" "autonomous campaign closure event present"
+
+# Verify US hospital seed data
+us_hospitals=$(mysql_query "SELECT COUNT(*) FROM hospitals WHERE country = 'United States';")
+if [ "$us_hospitals" -lt 3 ]; then
+  fail_case "us_hospital_seed_data" "expected 3 US hospitals, got $us_hospitals"
+fi
+pass_case "us_hospital_seed_data" "US hospital seed data present"
+
 cat >"$REPORT_DIR/migration_checks.json" <<EOF
-{"suite":"migration_checks","status":"pass","cases":12}
+{"suite":"migration_checks","status":"pass","cases":16}
 EOF

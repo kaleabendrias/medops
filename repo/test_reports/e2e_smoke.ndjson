@@ -1,0 +1,14 @@
+{"suite":"e2e_smoke","case":"admin_journey_entitlements","status":"pass","detail":"received 200"}
+{"suite":"e2e_smoke","case":"admin_journey_orders","status":"pass","detail":"received 200"}
+{"suite":"e2e_smoke","case":"admin_journey_ingestion","status":"pass","detail":"received 200"}
+{"suite":"e2e_smoke","case":"clinical_journey_patients","status":"pass","detail":"received 200"}
+{"suite":"e2e_smoke","case":"clinical_journey_dining_management_denied","status":"pass","detail":"received 403"}
+{"suite":"e2e_smoke","case":"clinical_journey_export","status":"pass","detail":"received 200"}
+{"suite":"e2e_smoke","case":"cafeteria_journey_orders","status":"pass","detail":"received 200"}
+{"suite":"e2e_smoke","case":"cafeteria_journey_patient_denied","status":"pass","detail":"received 403"}
+{"suite":"e2e_smoke","case":"cafeteria_journey_inventory","status":"pass","detail":"received 200"}
+{"suite":"e2e_smoke","case":"cafeteria_journey_export_denied","status":"pass","detail":"received 403"}
+{"suite":"e2e_smoke","case":"member_journey_orders","status":"pass","detail":"received 200"}
+{"suite":"e2e_smoke","case":"member_journey_patient_denied","status":"pass","detail":"received 403"}
+{"suite":"e2e_smoke","case":"member_journey_ingestion_denied","status":"pass","detail":"received 403"}
+{"suite":"e2e_smoke","case":"member_journey_catalog_denied","status":"pass","detail":"received 403"}

@@ -10,7 +10,7 @@ services:
     image: mysql:8.4
     container_name: monorepo_mysql
     restart: unless-stopped
-    command: --log-bin-trust-function-creators=1
+    command: --log-bin-trust-function-creators=1 --event-scheduler=ON
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password_local}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-hospital_platform}
@@ -20,6 +20,7 @@ services:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p${MYSQL_ROOT_PASSWORD:-root_password_local} --silent"]
       interval: 10s
@@ -70,6 +71,8 @@ services:
     working_dir: /workspace
     environment:
       PATH: /usr/local/cargo/bin:/usr/local/rustup/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      CARGO_HTTP_TIMEOUT: "120"
+      CARGO_NET_RETRY: "10"
     volumes:
       - .:/workspace
 
