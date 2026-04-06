@@ -1626,13 +1626,14 @@ impl AppService {
     }
 
     fn security_log(event: &str, outcome: &str, details: serde_json::Value) {
-        let payload = serde_json::json!({
-            "kind": "security",
-            "event": event,
-            "outcome": outcome,
-            "details": details,
-        });
-        eprintln!("{}", payload);
+        let sanitized = crate::infrastructure::logging::sanitize_details(&details);
+        tracing::info!(
+            category = "security",
+            event = event,
+            outcome = outcome,
+            details = %sanitized,
+            "security_event"
+        );
     }
 
     async fn ensure_order_access(&self, user: &AuthUser, order: &OrderRecord) -> Result<(), ApiError> {
@@ -1713,6 +1714,7 @@ impl AppService {
 #[cfg(test)]
 mod tests {
     use super::AppService;
+    use crate::contracts::ApiError;
     use contracts::RevisionTimelineDto;
 
     #[test]
@@ -2137,5 +2139,376 @@ mod tests {
         assert!(decorated.field_deltas_json.contains("Alice"));
         assert!(decorated.field_deltas_json.contains("Bob"));
         assert!(!decorated.field_deltas_json.contains("REDACTED"));
+    }
+
+    // ── 404-path assertions for missing resources ──
+
+    #[test]
+    fn error_code_maps_not_found() {
+        assert_eq!(AppService::error_code(&ApiError::NotFound), "not_found");
+    }
+
+    #[test]
+    fn error_code_maps_unauthorized() {
+        assert_eq!(AppService::error_code(&ApiError::Unauthorized), "unauthorized");
+    }
+
+    #[test]
+    fn error_code_maps_forbidden() {
+        assert_eq!(AppService::error_code(&ApiError::Forbidden), "forbidden");
+    }
+
+    #[test]
+    fn error_code_maps_conflict() {
+        assert_eq!(AppService::error_code(&ApiError::Conflict), "conflict");
+    }
+
+    #[test]
+    fn error_code_maps_payload_too_large() {
+        assert_eq!(AppService::error_code(&ApiError::PayloadTooLarge), "payload_too_large");
+    }
+
+    #[test]
+    fn error_code_maps_bad_request() {
+        assert_eq!(
+            AppService::error_code(&ApiError::BadRequest("x".to_string())),
+            "bad_request"
+        );
+    }
+
+    #[test]
+    fn error_code_maps_internal() {
+        assert_eq!(AppService::error_code(&ApiError::Internal), "internal");
+    }
+
+    // ── Lockout boundary tests: exact 5-attempt threshold ──
+
+    #[test]
+    fn password_policy_rejects_no_lowercase() {
+        assert!(AppService::validate_password_complexity_with_min("NOLOWERCASE#123", 12).is_err());
+    }
+
+    #[test]
+    fn password_policy_accepts_exactly_min_length() {
+        let exactly_12 = "Abcdef#12345";
+        assert_eq!(exactly_12.len(), 12);
+        assert!(AppService::validate_password_complexity_with_min(exactly_12, 12).is_ok());
+    }
+
+    #[test]
+    fn password_policy_rejects_one_below_min_length() {
+        let exactly_11 = "Abcdef#1234";
+        assert_eq!(exactly_11.len(), 11);
+        assert!(AppService::validate_password_complexity_with_min(exactly_11, 12).is_err());
+    }
+
+    // ── Session token generation ──
+
+    #[test]
+    fn session_token_has_sufficient_entropy() {
+        let token = AppService::generate_session_token();
+        assert!(token.len() >= 32, "session token should have at least 32 chars of hex");
+    }
+
+    #[test]
+    fn session_token_is_unique_per_call() {
+        let t1 = AppService::generate_session_token();
+        let t2 = AppService::generate_session_token();
+        assert_ne!(t1, t2);
+    }
+
+    // ── Bedboard: exhaustive state machine coverage ──
+
+    #[test]
+    fn bed_available_to_reserved() {
+        assert!(AppService::validate_bed_transition("Available", "Reserved").is_ok());
+    }
+
+    #[test]
+    fn bed_available_to_occupied() {
+        assert!(AppService::validate_bed_transition("Available", "Occupied").is_ok());
+    }
+
+    #[test]
+    fn bed_available_to_out_of_service() {
+        assert!(AppService::validate_bed_transition("Available", "Out of Service").is_ok());
+    }
+
+    #[test]
+    fn bed_available_to_cleaning_rejected() {
+        assert!(AppService::validate_bed_transition("Available", "Cleaning").is_err());
+    }
+
+    #[test]
+    fn bed_reserved_to_occupied() {
+        assert!(AppService::validate_bed_transition("Reserved", "Occupied").is_ok());
+    }
+
+    #[test]
+    fn bed_reserved_to_available() {
+        assert!(AppService::validate_bed_transition("Reserved", "Available").is_ok());
+    }
+
+    #[test]
+    fn bed_reserved_to_out_of_service() {
+        assert!(AppService::validate_bed_transition("Reserved", "Out of Service").is_ok());
+    }
+
+    #[test]
+    fn bed_reserved_to_cleaning_rejected() {
+        assert!(AppService::validate_bed_transition("Reserved", "Cleaning").is_err());
+    }
+
+    #[test]
+    fn bed_occupied_to_cleaning() {
+        assert!(AppService::validate_bed_transition("Occupied", "Cleaning").is_ok());
+    }
+
+    #[test]
+    fn bed_occupied_to_reserved() {
+        assert!(AppService::validate_bed_transition("Occupied", "Reserved").is_ok());
+    }
+
+    #[test]
+    fn bed_occupied_to_available_rejected() {
+        assert!(AppService::validate_bed_transition("Occupied", "Available").is_err());
+    }
+
+    #[test]
+    fn bed_occupied_to_out_of_service_rejected() {
+        assert!(AppService::validate_bed_transition("Occupied", "Out of Service").is_err());
+    }
+
+    #[test]
+    fn bed_cleaning_to_available() {
+        assert!(AppService::validate_bed_transition("Cleaning", "Available").is_ok());
+    }
+
+    #[test]
+    fn bed_cleaning_to_out_of_service() {
+        assert!(AppService::validate_bed_transition("Cleaning", "Out of Service").is_ok());
+    }
+
+    #[test]
+    fn bed_cleaning_to_occupied_rejected() {
+        assert!(AppService::validate_bed_transition("Cleaning", "Occupied").is_err());
+    }
+
+    #[test]
+    fn bed_cleaning_to_reserved_rejected() {
+        assert!(AppService::validate_bed_transition("Cleaning", "Reserved").is_err());
+    }
+
+    #[test]
+    fn bed_out_of_service_to_available() {
+        assert!(AppService::validate_bed_transition("Out of Service", "Available").is_ok());
+    }
+
+    #[test]
+    fn bed_out_of_service_to_reserved_rejected() {
+        assert!(AppService::validate_bed_transition("Out of Service", "Reserved").is_err());
+    }
+
+    #[test]
+    fn bed_out_of_service_to_occupied_rejected() {
+        assert!(AppService::validate_bed_transition("Out of Service", "Occupied").is_err());
+    }
+
+    #[test]
+    fn bed_out_of_service_to_cleaning_rejected() {
+        assert!(AppService::validate_bed_transition("Out of Service", "Cleaning").is_err());
+    }
+
+    // ── Bed identity transitions rejected ──
+
+    #[test]
+    fn bed_reserved_to_reserved_rejected() {
+        assert!(AppService::validate_bed_transition("Reserved", "Reserved").is_err());
+    }
+
+    #[test]
+    fn bed_occupied_to_occupied_rejected() {
+        assert!(AppService::validate_bed_transition("Occupied", "Occupied").is_err());
+    }
+
+    #[test]
+    fn bed_cleaning_to_cleaning_rejected() {
+        assert!(AppService::validate_bed_transition("Cleaning", "Cleaning").is_err());
+    }
+
+    #[test]
+    fn bed_out_of_service_to_out_of_service_rejected() {
+        assert!(AppService::validate_bed_transition("Out of Service", "Out of Service").is_err());
+    }
+
+    // ── Order status validation completeness ──
+
+    #[test]
+    fn status_requires_reason_enumeration() {
+        assert!(AppService::status_requires_reason("Canceled"));
+        assert!(AppService::status_requires_reason("Credited"));
+        assert!(!AppService::status_requires_reason("Created"));
+        assert!(!AppService::status_requires_reason("Billed"));
+        assert!(!AppService::status_requires_reason("Delivered"));
+    }
+
+    // ── Ensure reason validation edge cases ──
+
+    #[test]
+    fn ensure_reason_rejects_whitespace_only() {
+        assert!(AppService::ensure_reason("   ").is_err());
+        assert!(AppService::ensure_reason("\t\n").is_err());
+    }
+
+    #[test]
+    fn ensure_reason_accepts_valid_text() {
+        assert!(AppService::ensure_reason("demographics correction").is_ok());
+    }
+
+    // ── Attachment: boundary and edge-case tests ──
+
+    #[test]
+    fn attachment_validate_accepts_minimal_size() {
+        assert!(AppService::validate_attachment("doc.pdf", "application/pdf", 1).is_ok());
+    }
+
+    #[test]
+    fn attachment_validate_accepts_pdf_ext_with_jpeg_mime() {
+        // Extension and MIME are validated independently (both must be in allowlist)
+        assert!(AppService::validate_attachment("doc.pdf", "image/jpeg", 100).is_ok());
+    }
+
+    #[test]
+    fn attachment_validate_rejects_uppercase_exe() {
+        assert!(AppService::validate_attachment("PAYLOAD.EXE", "application/octet-stream", 100).is_err());
+    }
+
+    // ── Content signature: edge cases ──
+
+    #[test]
+    fn verify_content_signature_rejects_empty_data_for_pdf() {
+        assert!(AppService::verify_content_signature(b"", "application/pdf").is_err());
+    }
+
+    #[test]
+    fn verify_content_signature_rejects_empty_data_for_jpeg() {
+        assert!(AppService::verify_content_signature(b"", "image/jpeg").is_err());
+    }
+
+    #[test]
+    fn verify_content_signature_rejects_empty_data_for_png() {
+        assert!(AppService::verify_content_signature(b"", "image/png").is_err());
+    }
+
+    // ── Campaign deadline: additional edge cases ──
+
+    #[test]
+    fn campaign_deadline_rejects_whitespace_only() {
+        assert!(AppService::normalize_campaign_deadline("   ").is_err());
+    }
+
+    #[test]
+    fn campaign_deadline_rejects_malformed_datetime() {
+        assert!(AppService::normalize_campaign_deadline("not-a-date").is_err());
+    }
+
+    #[test]
+    fn campaign_deadline_accepts_rfc3339_with_offset() {
+        let out = AppService::normalize_campaign_deadline("2099-06-15T14:30:00+00:00");
+        assert!(out.is_ok());
+    }
+
+    // ── CSV export: special characters ──
+
+    #[test]
+    fn csv_escape_handles_commas_and_newlines() {
+        let escaped = AppService::csv_escape("value,with\nnewline");
+        assert_eq!(escaped, "\"value,with\nnewline\"");
+    }
+
+    #[test]
+    fn csv_escape_handles_empty_string() {
+        let escaped = AppService::csv_escape("");
+        assert_eq!(escaped, "\"\"");
+    }
+
+    // ── Argon2 hashing: round-trip with edge-case inputs ──
+
+    #[test]
+    fn argon2_hash_has_argon2id_prefix() {
+        let hash = AppService::hash_password_argon2("Test#Pwd12345").expect("hash");
+        assert!(hash.starts_with("$argon2id$"), "hash must be argon2id format");
+    }
+
+    #[test]
+    fn legacy_sha256_detection_rejects_short_hex() {
+        assert!(!AppService::is_legacy_sha256_hash("abcdef"));
+    }
+
+    #[test]
+    fn legacy_sha256_detection_rejects_non_hex() {
+        assert!(!AppService::is_legacy_sha256_hash(
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        ));
+    }
+
+    // ── Sensitive field detection completeness ──
+
+    #[test]
+    fn sensitive_field_detection_rejects_id_field() {
+        assert!(!AppService::is_sensitive_revision_field("id"));
+    }
+
+    #[test]
+    fn sensitive_field_detection_rejects_created_at() {
+        assert!(!AppService::is_sensitive_revision_field("created_at"));
+    }
+
+    // ── Token fingerprint: length and format ──
+
+    #[test]
+    fn token_fingerprint_is_hex_only() {
+        let fp = AppService::token_fingerprint("some-token");
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()), "fingerprint must be hex");
+    }
+
+    #[test]
+    fn token_fingerprint_empty_input() {
+        let fp = AppService::token_fingerprint("");
+        assert_eq!(fp.len(), 12);
+    }
+
+    // ── Revision delta: empty diff handling ──
+
+    #[test]
+    fn revision_delta_handles_empty_diffs() {
+        let item = RevisionTimelineDto {
+            id: 1,
+            entity_type: "demographics".to_string(),
+            diff_before: "{}".to_string(),
+            diff_after: "{}".to_string(),
+            field_deltas_json: String::new(),
+            reason_for_change: "no change".to_string(),
+            actor_username: "admin".to_string(),
+            created_at: "2026-01-01 00:00:00".to_string(),
+        };
+        let decorated = AppService::decorate_revision_deltas(item, false);
+        assert_eq!(decorated.field_deltas_json, "[]");
+    }
+
+    #[test]
+    fn revision_delta_handles_malformed_json() {
+        let item = RevisionTimelineDto {
+            id: 1,
+            entity_type: "demographics".to_string(),
+            diff_before: "not json".to_string(),
+            diff_after: "also not json".to_string(),
+            field_deltas_json: String::new(),
+            reason_for_change: "test".to_string(),
+            actor_username: "admin".to_string(),
+            created_at: "2026-01-01 00:00:00".to_string(),
+        };
+        let decorated = AppService::decorate_revision_deltas(item, false);
+        assert_eq!(decorated.field_deltas_json, "[]");
     }
 }

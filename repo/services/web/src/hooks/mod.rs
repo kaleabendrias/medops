@@ -1,0 +1,11 @@
+pub mod patients;
+pub mod bedboard;
+pub mod dining;
+pub mod orders;
+pub mod campaigns;
+pub mod ingestion;
+pub mod experiments;
+pub mod analytics;
+pub mod admin;
+pub mod audits;
+pub mod uploads;

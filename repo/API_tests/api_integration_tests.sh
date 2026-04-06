@@ -1018,6 +1018,107 @@ if [[ "$blob_col_type" != *"longblob"* ]]; then
 fi
 pass_case "attachment_blob_column_type" "attachment payload stored as LONGBLOB in MySQL"
 
+# ── Resource access for nonexistent IDs ──
+# Nonexistent patients return 403 (can_access_patient returns false for missing IDs)
+code=$(api_call "GET" "/patients/999999" "$admin_token")
+assert_code "patient_nonexistent_denied" "403" "$code"
+
+code=$(api_call "GET" "/patients/$patient_id/attachments/999999/download" "$admin_token")
+assert_code "attachment_nonexistent_404" "404" "$code"
+
+code=$(api_call "GET" "/orders/999999/notes" "$admin_token")
+assert_code "order_notes_nonexistent_404" "404" "$code"
+
+code=$(api_call "GET" "/orders/999999/ticket-splits" "$admin_token")
+assert_code "order_splits_nonexistent_404" "404" "$code"
+
+code=$(api_call "PUT" "/orders/999999/status" "$admin_token" '{"status":"Billed"}')
+assert_code "order_status_nonexistent_404" "404" "$code"
+
+code=$(api_call "GET" "/patients/999999/revisions" "$admin_token")
+assert_code "patient_revisions_nonexistent_denied" "403" "$code"
+
+code=$(api_call "GET" "/patients/999999/attachments" "$admin_token")
+assert_code "patient_attachments_nonexistent_denied" "403" "$code"
+
+# ── Invalid/revoked token route matrix ──
+invalid_token="totally-invalid-token-that-does-not-exist"
+code=$(api_call "GET" "/orders" "$invalid_token")
+assert_code "invalid_token_orders_rejected" "401" "$code"
+
+code=$(api_call "GET" "/patients/search?q=x" "$invalid_token")
+assert_code "invalid_token_patients_rejected" "401" "$code"
+
+code=$(api_call "GET" "/admin/users" "$invalid_token")
+assert_code "invalid_token_admin_rejected" "401" "$code"
+
+code=$(api_call "GET" "/retention/policies" "$invalid_token")
+assert_code "invalid_token_retention_rejected" "401" "$code"
+
+code=$(api_call "GET" "/ingestion/tasks" "$invalid_token")
+assert_code "invalid_token_ingestion_rejected" "401" "$code"
+
+code=$(api_call "GET" "/analytics/funnel" "$invalid_token")
+assert_code "invalid_token_analytics_rejected" "401" "$code"
+
+code=$(api_call "GET" "/bedboard/beds" "$invalid_token")
+assert_code "invalid_token_bedboard_rejected" "401" "$code"
+
+code=$(api_call "GET" "/governance/records" "$invalid_token")
+assert_code "invalid_token_governance_rejected" "401" "$code"
+
+code=$(api_call "GET" "/audits" "$invalid_token")
+assert_code "invalid_token_audits_rejected" "401" "$code"
+
+code=$(api_call "GET" "/campaigns" "$invalid_token")
+assert_code "invalid_token_campaigns_rejected" "401" "$code"
+
+# Revoked token (disable user, then try their token)
+revoke_test_token=$(login_token "member1" "Admin#OfflinePass123")
+mysql_query "DELETE FROM sessions WHERE session_token = '$revoke_test_token';"
+code=$(api_call "GET" "/orders" "$revoke_test_token")
+assert_code "revoked_token_orders_rejected" "401" "$code"
+# Re-login member for downstream use
+member_token=$(login_token "member1" "Admin#OfflinePass123")
+
+# ── Session timeout boundary: exactly 480 minutes ──
+boundary_token=$(login_token "member1" "Admin#OfflinePass123")
+mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 479 MINUTE) WHERE session_token = '$boundary_token';"
+code=$(api_call "GET" "/session" "$boundary_token")
+assert_code "session_active_at_479_minutes" "200" "$code"
+
+boundary_token_expired=$(login_token "member1" "Admin#OfflinePass123")
+mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 481 MINUTE) WHERE session_token = '$boundary_token_expired';"
+code=$(api_call "GET" "/session" "$boundary_token_expired")
+assert_code "session_expired_at_481_minutes" "401" "$code"
+
+# ── Governance RBAC: non-admin denied ──
+code=$(api_call "GET" "/governance/records" "$member_token")
+assert_code "governance_deny_member" "403" "$code"
+
+code=$(api_call "GET" "/governance/records" "$cafeteria_token")
+assert_code "governance_deny_cafeteria" "403" "$code"
+
+code=$(api_call "POST" "/governance/records" "$member_token" '{"tier":"raw","lineage_source_id":null,"lineage_metadata":"test","payload_json":"{}"}')
+assert_code "governance_create_deny_member" "403" "$code"
+
+# ── Admin debug routes: RBAC validation ──
+code=$(api_call "GET" "/admin/users" "$admin_token")
+assert_code "admin_users_allow" "200" "$code"
+
+code=$(api_call "GET" "/admin/users" "$clinical_token")
+assert_code "admin_users_deny_clinical" "403" "$code"
+
+code=$(api_call "GET" "/admin/users" "$cafeteria_token")
+assert_code "admin_users_deny_cafeteria" "403" "$code"
+
+# ── Audit immutability: PUT/DELETE via API ──
+code=$(api_call "GET" "/audits" "$admin_token")
+assert_code "audits_list_allow_admin" "200" "$code"
+
+code=$(api_call "GET" "/audits" "$member_token")
+assert_code "audits_deny_member" "403" "$code"
+
 cat >"$REPORT_DIR/api_integration_tests.json" <<EOF
 {"suite":"api_integration_tests","status":"pass"}
 EOF

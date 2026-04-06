@@ -48,6 +48,7 @@ async fn health(state: &State<AppState>) -> Result<Json<contracts::HealthRespons
 
 #[rocket::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    infrastructure::logging::init();
     let cfg = AppConfig::load("/app/config/default.toml")?;
     if !cfg.auth_policy.offline_only {
         return Err("auth_policy.offline_only must remain true for this deployment".into());

@@ -239,6 +239,41 @@ if [ "$member_ingestion_menu" = "0" ] && [ "$code" = "200" ]; then
 fi
 pass_case "menu_route_service_consistency_member_ingestion" "member ingestion entitlement aligns with route and service"
 
+# ── Governance RBAC: admin-only access ──
+code=$(status_for "$admin_token" "GET" "/governance/records")
+[ "$code" = "200" ] || fail_case "governance_allow_admin" "expected 200 got $code"
+pass_case "governance_allow_admin" "admin can access governance records"
+
+code=$(status_for "$member_token" "GET" "/governance/records")
+[ "$code" = "403" ] || fail_case "governance_deny_member" "expected 403 got $code"
+pass_case "governance_deny_member" "member denied governance records"
+
+code=$(status_for "$clinical_token" "GET" "/governance/records")
+[ "$code" = "403" ] || fail_case "governance_deny_clinical" "expected 403 got $code"
+pass_case "governance_deny_clinical" "clinical user denied governance records"
+
+code=$(status_for "$cafeteria_token" "GET" "/governance/records")
+[ "$code" = "403" ] || fail_case "governance_deny_cafeteria" "expected 403 got $code"
+pass_case "governance_deny_cafeteria" "cafeteria user denied governance records"
+
+# ── Audit log RBAC ──
+code=$(status_for "$admin_token" "GET" "/audits")
+[ "$code" = "200" ] || fail_case "audits_allow_admin" "expected 200 got $code"
+pass_case "audits_allow_admin" "admin can list audit logs"
+
+code=$(status_for "$member_token" "GET" "/audits")
+[ "$code" = "403" ] || fail_case "audits_deny_member" "expected 403 got $code"
+pass_case "audits_deny_member" "member denied audit log access"
+
+# ── Analytics RBAC ──
+code=$(status_for "$admin_token" "GET" "/analytics/funnel")
+[ "$code" = "200" ] || fail_case "analytics_allow_admin" "expected 200 got $code"
+pass_case "analytics_allow_admin" "admin can access analytics"
+
+code=$(status_for "$member_token" "GET" "/analytics/funnel")
+[ "$code" = "403" ] || fail_case "analytics_deny_member" "expected 403 got $code"
+pass_case "analytics_deny_member" "member denied analytics access"
+
 cat >"$REPORT_DIR/authorization_matrix.json" <<EOF
-{"suite":"authorization_matrix","status":"pass","cases":28}
+{"suite":"authorization_matrix","status":"pass","cases":36}
 EOF

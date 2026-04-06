@@ -20,6 +20,18 @@ impl Fairing for AuthFairing {
 
     async fn on_request(&self, req: &mut Request<'_>, _data: &mut Data<'_>) {
         let path = req.uri().path().to_string();
+        let correlation_id = uuid::Uuid::new_v4().to_string();
+        req.local_cache(|| correlation_id.clone());
+
+        let method = req.method().as_str().to_string();
+        tracing::info!(
+            category = "http",
+            correlation_id = %correlation_id,
+            method = %method,
+            path = %path,
+            "request_received"
+        );
+
         if !path.starts_with("/api/v1") {
             return;
         }

@@ -20,3 +20,11 @@
 {"suite":"authorization_matrix","case":"menu_route_service_consistency_member_orders","status":"pass","detail":"member menu entitlement aligns with route and service"}
 {"suite":"authorization_matrix","case":"menu_route_service_consistency_admin_ingestion","status":"pass","detail":"admin ingestion entitlement aligns with route and service"}
 {"suite":"authorization_matrix","case":"menu_route_service_consistency_member_ingestion","status":"pass","detail":"member ingestion entitlement aligns with route and service"}
+{"suite":"authorization_matrix","case":"governance_allow_admin","status":"pass","detail":"admin can access governance records"}
+{"suite":"authorization_matrix","case":"governance_deny_member","status":"pass","detail":"member denied governance records"}
+{"suite":"authorization_matrix","case":"governance_deny_clinical","status":"pass","detail":"clinical user denied governance records"}
+{"suite":"authorization_matrix","case":"governance_deny_cafeteria","status":"pass","detail":"cafeteria user denied governance records"}
+{"suite":"authorization_matrix","case":"audits_allow_admin","status":"pass","detail":"admin can list audit logs"}
+{"suite":"authorization_matrix","case":"audits_deny_member","status":"pass","detail":"member denied audit log access"}
+{"suite":"authorization_matrix","case":"analytics_allow_admin","status":"pass","detail":"admin can access analytics"}
+{"suite":"authorization_matrix","case":"analytics_deny_member","status":"pass","detail":"member denied analytics access"}

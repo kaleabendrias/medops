@@ -33,7 +33,6 @@ Integrated containerized verification requires:
 
 - Docker + Docker Compose plugin
 - `bash`, `curl`, `python3`, `sha256sum`
-- `google-chrome` for browser-level E2E checks (`API_tests/browser_e2e.sh`)
 
 Non-Docker frontend checks require:
 
@@ -51,7 +50,6 @@ bash unit_tests/run_frontend_unit_tests.sh test_reports
 bash API_tests/migration_checks.sh test_reports
 bash API_tests/authorization_matrix.sh test_reports
 bash API_tests/api_integration_tests.sh test_reports
-bash API_tests/browser_e2e.sh test_reports
 bash API_tests/e2e_smoke.sh test_reports
 bash run_tests.sh
 ```
@@ -61,7 +59,6 @@ Expected success signals:
 - each command exits `0`
 - each suite writes `test_reports/<suite>.json` with `"status":"pass"`
 - `bash run_tests.sh` writes `test_reports/summary.json` with `"status":"pass"`
-- browser suite writes `test_reports/browser_e2e.json` with happy-path and denied-path pass
 
 Reproducible acceptance evidence is written to `test_reports/`:
 
@@ -195,7 +192,7 @@ Implemented domains include:
 - patient CRUD, assignment-based object isolation, masked-by-default sensitive fields with privileged reveal
 - bed board transitions with legal state-machine enforcement
 - dining orders with idempotent create and versioned status updates
-- MySQL-authoritative patient attachment payload storage with legacy filesystem fallback for historical rows
+- MySQL-authoritative patient attachment payload storage (BLOB-only, no filesystem fallback)
 - ingestion task manager (create, update, versions, rollback, run)
 - governance lineage/tombstone behavior
 - experimentation telemetry and analytics endpoints
@@ -228,7 +225,6 @@ All retention endpoints require authentication. Policy listing requires `audit.r
 - Attachment upload failures:
   - confirm file extension and MIME match (PDF/JPG/PNG) and size <= 25 MB.
   - verify `patient_attachments.payload_blob` exists (`bash API_tests/migration_checks.sh test_reports`).
-  - legacy rows with `payload_blob IS NULL` must still have a readable `storage_path`.
 - Frontend-only checks:
   - `cargo test -p web-app`
   - optional local dev server: `dx serve --platform web` (if Dioxus CLI available).

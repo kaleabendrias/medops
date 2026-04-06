@@ -2522,19 +2522,15 @@ impl AppRepository for MySqlAppRepository {
             Ok((status, records_persisted, diagnostics, max_incremental)) => {
                 let next_run = Self::next_run_iso(&schedule_cron)?;
                 if status == "failed" {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "kind":"security",
-                            "event":"ingestion.execution",
-                            "outcome":"failed",
-                            "details":{
-                                "task_id":task_id,
-                                "run_id":run_id,
-                                "records_extracted":records_persisted,
-                                "deterministic":diagnostics.get("deterministic").and_then(|v| v.as_bool()).unwrap_or(false)
-                            }
-                        })
+                    tracing::warn!(
+                        category = "ingestion",
+                        event = "ingestion.execution",
+                        outcome = "failed",
+                        task_id = task_id,
+                        run_id = run_id,
+                        records_extracted = records_persisted,
+                        deterministic = diagnostics.get("deterministic").and_then(|v| v.as_bool()).unwrap_or(false),
+                        "ingestion_task_failed"
                     );
                 }
                 sqlx::query(
@@ -2566,14 +2562,14 @@ impl AppRepository for MySqlAppRepository {
                 Ok(())
             }
             Err(err) => {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({
-                        "kind":"security",
-                        "event":"ingestion.execution",
-                        "outcome":"failed",
-                        "details":{"task_id":task_id,"run_id":run_id,"error_code":"execution_error"}
-                    })
+                tracing::error!(
+                    category = "ingestion",
+                    event = "ingestion.execution",
+                    outcome = "failed",
+                    task_id = task_id,
+                    run_id = run_id,
+                    error_code = "execution_error",
+                    "ingestion_execution_error"
                 );
                 let diagnostics = serde_json::json!({
                     "deterministic": true,

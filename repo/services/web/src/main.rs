@@ -1,25 +1,30 @@
 mod api;
 mod components;
 mod features;
+mod hooks;
 mod pages;
 mod state;
 mod ui_logic;
 
 use std::time::Duration;
 
-use contracts::{
-    AttachmentMetadataDto, BedDto, BedEventDto, CampaignDto, DishCategoryDto, DishDto,
-    FunnelMetricsDto, IngestionTaskDto, IngestionTaskRunDto, IngestionTaskVersionDto,
-    OrderDto, OrderNoteDto, PatientProfileDto, PatientSearchResultDto,
-    RecommendationDto, RecommendationKpiDto, RetentionMetricsDto, RevisionTimelineDto,
-    TicketSplitDto, UserSummaryDto,
-};
 use dioxus::prelude::*;
 use gloo_timers::future::sleep;
 use components::app_shell::{AppShell, ShellNavItem};
 use components::auth_gate::AuthGate;
 use features::guards::resolve_page_access;
 use features::navigation::nav_items;
+use hooks::admin::use_admin_state;
+use hooks::analytics::use_analytics_state;
+use hooks::audits::use_audits_state;
+use hooks::bedboard::use_bedboard_state;
+use hooks::campaigns::use_campaigns_state;
+use hooks::dining::use_dining_state;
+use hooks::experiments::use_experiments_state;
+use hooks::ingestion::use_ingestion_state;
+use hooks::orders::use_orders_state;
+use hooks::patients::use_patients_state;
+use hooks::uploads::use_uploads_state;
 use pages::admin::AdminPage;
 use pages::analytics::AnalyticsPage;
 use pages::audits::AuditsPage;
@@ -35,7 +40,6 @@ use state::{
     can_access, clear_session, ensure_accessible_page, is_user_switch,
     load_session, save_session, session_from_entitlements, Page, SessionContext, StoredSession,
 };
-use ui_logic::{QueuedAttachment, UploadState};
 
 fn main() {
     launch(App);
@@ -68,40 +72,6 @@ fn set_hash_page(page: Page) {
     }
 }
 
-fn clear_workspace_data(
-    mut selected_patient_id: Signal<Option<i64>>,
-    mut patient_results: Signal<Vec<PatientSearchResultDto>>,
-    mut patient_profile: Signal<Option<PatientProfileDto>>,
-    mut patient_revisions: Signal<Vec<RevisionTimelineDto>>,
-    mut patient_attachments: Signal<Vec<AttachmentMetadataDto>>,
-    mut orders: Signal<Vec<OrderDto>>,
-    mut order_note_timeline: Signal<Vec<OrderNoteDto>>,
-    mut order_split_timeline: Signal<Vec<TicketSplitDto>>,
-    mut order_status_reason: Signal<String>,
-    mut ingestion_tasks: Signal<Vec<IngestionTaskDto>>,
-    mut ingestion_versions: Signal<Vec<IngestionTaskVersionDto>>,
-    mut ingestion_runs: Signal<Vec<IngestionTaskRunDto>>,
-    mut attachment_queue: Signal<Vec<QueuedAttachment>>,
-    mut upload_state_kind: Signal<UploadState>,
-    mut upload_progress: Signal<u8>,
-) {
-    selected_patient_id.set(None);
-    patient_results.set(Vec::new());
-    patient_profile.set(None);
-    patient_revisions.set(Vec::new());
-    patient_attachments.set(Vec::new());
-    orders.set(Vec::new());
-    order_note_timeline.set(Vec::new());
-    order_split_timeline.set(Vec::new());
-    order_status_reason.set(String::new());
-    ingestion_tasks.set(Vec::new());
-    ingestion_versions.set(Vec::new());
-    ingestion_runs.set(Vec::new());
-    attachment_queue.set(Vec::new());
-    upload_state_kind.set(UploadState::Idle);
-    upload_progress.set(0);
-}
-
 #[component]
 fn App() -> Element {
     let mut status = use_signal(String::new);
@@ -112,121 +82,25 @@ fn App() -> Element {
     let mut login_username = use_signal(String::new);
     let mut login_password = use_signal(String::new);
 
-    let patient_query = use_signal(String::new);
-    let patient_results = use_signal(Vec::<PatientSearchResultDto>::new);
-    let selected_patient_id = use_signal(|| None::<i64>);
-    let patient_profile = use_signal(|| None::<PatientProfileDto>);
-    let patient_revisions = use_signal(Vec::<RevisionTimelineDto>::new);
-    let patient_attachments = use_signal(Vec::<AttachmentMetadataDto>::new);
-    let demo_first_name = use_signal(String::new);
-    let demo_last_name = use_signal(String::new);
-    let demo_birth_date = use_signal(String::new);
-    let demo_gender = use_signal(String::new);
-    let demo_phone = use_signal(String::new);
-    let demo_email = use_signal(String::new);
-    let demo_reason = use_signal(String::new);
-    let allergies_value = use_signal(String::new);
-    let contraindications_value = use_signal(String::new);
-    let history_value = use_signal(String::new);
-    let clinical_reason = use_signal(String::new);
-    let visit_note = use_signal(String::new);
-    let visit_reason = use_signal(String::new);
-    let patient_export_format = use_signal(|| "json".to_string());
-    let mut beds = use_signal(Vec::<BedDto>::new);
-    let mut bed_events = use_signal(Vec::<BedEventDto>::new);
-    let bed_transition_id = use_signal(String::new);
-    let bed_transition_action = use_signal(|| "check-in".to_string());
-    let bed_transition_state = use_signal(|| "Occupied".to_string());
-    let bed_transition_patient_id = use_signal(String::new);
-    let bed_transition_related = use_signal(String::new);
-    let bed_transition_note = use_signal(String::new);
+    // Page-level state hooks — each module owns its own signals
+    let mut patients = use_patients_state();
+    let bedboard = use_bedboard_state();
+    let dining = use_dining_state();
+    let mut orders = use_orders_state();
+    let campaigns = use_campaigns_state();
+    let mut ingestion = use_ingestion_state();
+    let experiments = use_experiments_state();
+    let analytics = use_analytics_state();
+    let admin = use_admin_state();
+    let audits = use_audits_state();
+    let mut uploads = use_uploads_state();
 
-    let categories = use_signal(Vec::<DishCategoryDto>::new);
-    let dishes = use_signal(Vec::<DishDto>::new);
-    let ranking_rules = use_signal(Vec::<contracts::RankingRuleDto>::new);
-    let recommendations = use_signal(Vec::<RecommendationDto>::new);
-    let dish_category_id = use_signal(String::new);
-    let dish_name = use_signal(String::new);
-    let dish_description = use_signal(String::new);
-    let dish_price = use_signal(|| "0".to_string());
-    let dish_photo_path = use_signal(|| "/var/lib/rocket-api/dishes/new.jpg".to_string());
-    let dish_status_id = use_signal(String::new);
-    let dish_published = use_signal(|| true);
-    let dish_sold_out = use_signal(|| false);
-    let dish_option_id = use_signal(String::new);
-    let dish_option_group = use_signal(String::new);
-    let dish_option_value = use_signal(String::new);
-    let dish_option_delta = use_signal(|| "0".to_string());
-    let dish_window_id = use_signal(String::new);
-    let dish_window_slot = use_signal(|| "Lunch".to_string());
-    let dish_window_start = use_signal(|| "11:00".to_string());
-    let dish_window_end = use_signal(|| "14:00".to_string());
-    let ranking_rule_key = use_signal(String::new);
-    let ranking_rule_weight = use_signal(|| "0.5".to_string());
-    let ranking_rule_enabled = use_signal(|| true);
-
-    let menus = use_signal(Vec::<contracts::DiningMenuDto>::new);
-    let orders = use_signal(Vec::<OrderDto>::new);
-    let order_patient_id = use_signal(|| "1".to_string());
-    let order_menu_id = use_signal(|| "1".to_string());
-    let order_notes = use_signal(String::new);
-    let order_status_id = use_signal(String::new);
-    let order_status_value = use_signal(|| "Created".to_string());
-    let order_status_reason = use_signal(String::new);
-    let order_note_id = use_signal(String::new);
-    let order_note_text = use_signal(String::new);
-    let order_split_id = use_signal(String::new);
-    let order_split_by = use_signal(|| "room".to_string());
-    let order_split_value = use_signal(String::new);
-    let order_split_quantity = use_signal(|| "1".to_string());
-    let order_note_timeline = use_signal(Vec::<OrderNoteDto>::new);
-    let order_split_timeline = use_signal(Vec::<TicketSplitDto>::new);
-
-    let upload_progress = use_signal(|| 0u8);
-    let upload_state = use_signal(String::new);
-    let upload_state_kind = use_signal(|| UploadState::Idle);
-    let attachment_queue = use_signal(Vec::<QueuedAttachment>::new);
-
-    let ingestion_tasks = use_signal(Vec::<IngestionTaskDto>::new);
-    let ingestion_versions = use_signal(Vec::<IngestionTaskVersionDto>::new);
-    let ingestion_runs = use_signal(Vec::<IngestionTaskRunDto>::new);
-    let ingestion_task_name = use_signal(|| "patient-feed-ui".to_string());
-    let ingestion_seed_urls = use_signal(|| "file:///app/config/ingestion_fixture/page1.html".to_string());
-    let ingestion_rules =
-        use_signal(|| "{\"mode\":\"css\",\"fields\":[\".record\"],\"pagination_selector\":\"a.next\"}".to_string());
-    let ingestion_strategy = use_signal(|| "breadth-first".to_string());
-    let ingestion_depth = use_signal(|| "2".to_string());
-    let ingestion_incremental_field = use_signal(|| "value".to_string());
-    let ingestion_schedule = use_signal(|| "0 * * * *".to_string());
-    let ingestion_selected_task = use_signal(String::new);
-    let ingestion_rollback_version = use_signal(String::new);
-    let ingestion_rollback_reason = use_signal(String::new);
-
-    let campaigns = use_signal(Vec::<CampaignDto>::new);
-    let campaign_title = use_signal(String::new);
-    let campaign_dish_id = use_signal(|| "1".to_string());
-    let campaign_threshold = use_signal(|| "5".to_string());
-    let campaign_deadline = use_signal(|| "2099-01-01 10:30:00".to_string());
-    let campaign_join_id = use_signal(String::new);
-
-    let users = use_signal(Vec::<UserSummaryDto>::new);
-
-    let experiment_id = use_signal(String::new);
-    let experiment_key = use_signal(String::new);
-    let variant_key = use_signal(String::new);
-    let variant_weight = use_signal(|| "1.0".to_string());
-    let variant_version = use_signal(|| "v1".to_string());
-    let assign_user_id = use_signal(|| "1".to_string());
-    let assign_mode = use_signal(|| "manual".to_string());
-    let backtrack_from = use_signal(|| "v2".to_string());
-    let backtrack_to = use_signal(|| "v1".to_string());
-    let backtrack_reason = use_signal(String::new);
-    let assigned_variant = use_signal(String::new);
-
-    let funnel = use_signal(Vec::<FunnelMetricsDto>::new);
-    let retention = use_signal(Vec::<RetentionMetricsDto>::new);
-    let recommendation_kpi = use_signal(|| None::<RecommendationKpiDto>);
-    let audits = use_signal(Vec::<contracts::AuditLogDto>::new);
+    let mut reset_workspace = move || {
+        patients.reset();
+        orders.reset();
+        ingestion.reset();
+        uploads.reset();
+    };
 
     use_future(move || async move {
         if let Some(stored) = load_session() {
@@ -246,6 +120,9 @@ fn App() -> Element {
         }
     });
 
+    // Bedboard polling effect
+    let mut beds = bedboard.beds;
+    let mut bed_events = bedboard.bed_events;
     use_future(move || async move {
         loop {
             if let Some(ctx) = session() {
@@ -286,23 +163,7 @@ fn App() -> Element {
                                             role: auth.role,
                                         };
                                         let switched_user = is_user_switch(session().as_ref(), &stored);
-                                        clear_workspace_data(
-                                            selected_patient_id,
-                                            patient_results,
-                                            patient_profile,
-                                            patient_revisions,
-                                            patient_attachments,
-                                            orders,
-                                            order_note_timeline,
-                                            order_split_timeline,
-                                            order_status_reason,
-                                            ingestion_tasks,
-                                            ingestion_versions,
-                                            ingestion_runs,
-                                            attachment_queue,
-                                            upload_state_kind,
-                                            upload_progress,
-                                        );
+                                        reset_workspace();
                                         save_session(&stored);
                                         let next_session = session_from_entitlements(stored, list);
                                         let requested = if switched_user {
@@ -376,23 +237,7 @@ fn App() -> Element {
                 page.set(Page::Dashboard);
                 status.set(String::new());
                 error.set(String::new());
-                clear_workspace_data(
-                    selected_patient_id,
-                    patient_results,
-                    patient_profile,
-                    patient_revisions,
-                    patient_attachments,
-                    orders,
-                    order_note_timeline,
-                    order_split_timeline,
-                    order_status_reason,
-                    ingestion_tasks,
-                    ingestion_versions,
-                    ingestion_runs,
-                    attachment_queue,
-                    upload_state_kind,
-                    upload_progress,
-                );
+                reset_workspace();
             },
 
                 if forbidden {
@@ -402,73 +247,143 @@ fn App() -> Element {
                 } else if page() == Page::Patients {
                     PatientsPage {
                         status, error, session,
-                        patient_query, patient_results, selected_patient_id,
-                        patient_profile, patient_revisions, patient_attachments,
-                        demo_first_name, demo_last_name, demo_birth_date,
-                        demo_gender, demo_phone, demo_email, demo_reason,
-                        allergies_value, contraindications_value, history_value,
-                        clinical_reason, visit_note, visit_reason,
-                        patient_export_format,
-                        upload_progress, upload_state, upload_state_kind, attachment_queue,
+                        patient_query: patients.patient_query,
+                        patient_results: patients.patient_results,
+                        selected_patient_id: patients.selected_patient_id,
+                        patient_profile: patients.patient_profile,
+                        patient_revisions: patients.patient_revisions,
+                        patient_attachments: patients.patient_attachments,
+                        demo_first_name: patients.demo_first_name,
+                        demo_last_name: patients.demo_last_name,
+                        demo_birth_date: patients.demo_birth_date,
+                        demo_gender: patients.demo_gender,
+                        demo_phone: patients.demo_phone,
+                        demo_email: patients.demo_email,
+                        demo_reason: patients.demo_reason,
+                        allergies_value: patients.allergies_value,
+                        contraindications_value: patients.contraindications_value,
+                        history_value: patients.history_value,
+                        clinical_reason: patients.clinical_reason,
+                        visit_note: patients.visit_note,
+                        visit_reason: patients.visit_reason,
+                        patient_export_format: patients.patient_export_format,
+                        upload_progress: uploads.upload_progress,
+                        upload_state: uploads.upload_state,
+                        upload_state_kind: uploads.upload_state_kind,
+                        attachment_queue: uploads.attachment_queue,
                     }
                 } else if page() == Page::Bedboard {
                     BedboardPage {
                         status, error, session,
-                        beds, bed_events,
-                        bed_transition_id, bed_transition_action,
-                        bed_transition_state, bed_transition_patient_id, bed_transition_related, bed_transition_note,
+                        beds: bedboard.beds,
+                        bed_events: bedboard.bed_events,
+                        bed_transition_id: bedboard.bed_transition_id,
+                        bed_transition_action: bedboard.bed_transition_action,
+                        bed_transition_state: bedboard.bed_transition_state,
+                        bed_transition_patient_id: bedboard.bed_transition_patient_id,
+                        bed_transition_related: bedboard.bed_transition_related,
+                        bed_transition_note: bedboard.bed_transition_note,
                     }
                 } else if page() == Page::Dining {
                     DiningPage {
                         status, error, session,
-                        categories, dishes, ranking_rules, recommendations,
-                        dish_category_id, dish_name, dish_description, dish_price, dish_photo_path,
-                        dish_status_id, dish_published, dish_sold_out,
-                        dish_option_id, dish_option_group, dish_option_value, dish_option_delta,
-                        dish_window_id, dish_window_slot, dish_window_start, dish_window_end,
-                        ranking_rule_key, ranking_rule_weight, ranking_rule_enabled,
+                        categories: dining.categories,
+                        dishes: dining.dishes,
+                        ranking_rules: dining.ranking_rules,
+                        recommendations: dining.recommendations,
+                        dish_category_id: dining.dish_category_id,
+                        dish_name: dining.dish_name,
+                        dish_description: dining.dish_description,
+                        dish_price: dining.dish_price,
+                        dish_photo_path: dining.dish_photo_path,
+                        dish_status_id: dining.dish_status_id,
+                        dish_published: dining.dish_published,
+                        dish_sold_out: dining.dish_sold_out,
+                        dish_option_id: dining.dish_option_id,
+                        dish_option_group: dining.dish_option_group,
+                        dish_option_value: dining.dish_option_value,
+                        dish_option_delta: dining.dish_option_delta,
+                        dish_window_id: dining.dish_window_id,
+                        dish_window_slot: dining.dish_window_slot,
+                        dish_window_start: dining.dish_window_start,
+                        dish_window_end: dining.dish_window_end,
+                        ranking_rule_key: dining.ranking_rule_key,
+                        ranking_rule_weight: dining.ranking_rule_weight,
+                        ranking_rule_enabled: dining.ranking_rule_enabled,
                     }
                 } else if page() == Page::Orders {
                     OrdersPage {
                         status, error, session,
-                        menus, orders,
-                        order_patient_id, order_menu_id, order_notes,
-                        order_status_id, order_status_value, order_status_reason,
-                        order_note_id, order_note_text,
-                        order_split_id, order_split_by, order_split_value, order_split_quantity,
-                        order_note_timeline, order_split_timeline,
+                        menus: orders.menus,
+                        orders: orders.orders,
+                        order_patient_id: orders.order_patient_id,
+                        order_menu_id: orders.order_menu_id,
+                        order_notes: orders.order_notes,
+                        order_status_id: orders.order_status_id,
+                        order_status_value: orders.order_status_value,
+                        order_status_reason: orders.order_status_reason,
+                        order_note_id: orders.order_note_id,
+                        order_note_text: orders.order_note_text,
+                        order_split_id: orders.order_split_id,
+                        order_split_by: orders.order_split_by,
+                        order_split_value: orders.order_split_value,
+                        order_split_quantity: orders.order_split_quantity,
+                        order_note_timeline: orders.order_note_timeline,
+                        order_split_timeline: orders.order_split_timeline,
                     }
                 } else if page() == Page::Campaigns {
                     CampaignsPage {
                         status, error, session,
-                        campaigns,
-                        campaign_title, campaign_dish_id, campaign_threshold,
-                        campaign_deadline, campaign_join_id,
+                        campaigns: campaigns.campaigns,
+                        campaign_title: campaigns.campaign_title,
+                        campaign_dish_id: campaigns.campaign_dish_id,
+                        campaign_threshold: campaigns.campaign_threshold,
+                        campaign_deadline: campaigns.campaign_deadline,
+                        campaign_join_id: campaigns.campaign_join_id,
                     }
                 } else if page() == Page::Ingestion {
                     IngestionPage {
                         status, error, session,
-                        ingestion_tasks, ingestion_versions, ingestion_runs,
-                        ingestion_task_name, ingestion_seed_urls, ingestion_rules,
-                        ingestion_strategy, ingestion_depth, ingestion_incremental_field,
-                        ingestion_schedule, ingestion_selected_task,
-                        ingestion_rollback_version, ingestion_rollback_reason,
+                        ingestion_tasks: ingestion.ingestion_tasks,
+                        ingestion_versions: ingestion.ingestion_versions,
+                        ingestion_runs: ingestion.ingestion_runs,
+                        ingestion_task_name: ingestion.ingestion_task_name,
+                        ingestion_seed_urls: ingestion.ingestion_seed_urls,
+                        ingestion_rules: ingestion.ingestion_rules,
+                        ingestion_strategy: ingestion.ingestion_strategy,
+                        ingestion_depth: ingestion.ingestion_depth,
+                        ingestion_incremental_field: ingestion.ingestion_incremental_field,
+                        ingestion_schedule: ingestion.ingestion_schedule,
+                        ingestion_selected_task: ingestion.ingestion_selected_task,
+                        ingestion_rollback_version: ingestion.ingestion_rollback_version,
+                        ingestion_rollback_reason: ingestion.ingestion_rollback_reason,
                     }
                 } else if page() == Page::Admin {
-                    AdminPage { status, error, session, users }
+                    AdminPage { status, error, session, users: admin.users }
                 } else if page() == Page::Experiments {
                     ExperimentsPage {
                         status, error, session,
-                        experiment_id, experiment_key,
-                        variant_key, variant_weight, variant_version,
-                        assign_user_id, assign_mode,
-                        backtrack_from, backtrack_to, backtrack_reason,
-                        assigned_variant,
+                        experiment_id: experiments.experiment_id,
+                        experiment_key: experiments.experiment_key,
+                        variant_key: experiments.variant_key,
+                        variant_weight: experiments.variant_weight,
+                        variant_version: experiments.variant_version,
+                        assign_user_id: experiments.assign_user_id,
+                        assign_mode: experiments.assign_mode,
+                        backtrack_from: experiments.backtrack_from,
+                        backtrack_to: experiments.backtrack_to,
+                        backtrack_reason: experiments.backtrack_reason,
+                        assigned_variant: experiments.assigned_variant,
                     }
                 } else if page() == Page::Analytics {
-                    AnalyticsPage { session, funnel, retention, recommendation_kpi }
+                    AnalyticsPage {
+                        session,
+                        funnel: analytics.funnel,
+                        retention: analytics.retention,
+                        recommendation_kpi: analytics.recommendation_kpi,
+                    }
                 } else if page() == Page::Audits {
-                    AuditsPage { error, session, audits }
+                    AuditsPage { error, session, audits: audits.audits }
                 }
         }
     }
