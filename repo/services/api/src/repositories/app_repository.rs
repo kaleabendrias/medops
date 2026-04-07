@@ -58,6 +58,24 @@ pub struct PatientSensitiveRecord {
     pub history: String,
 }
 
+/// Atomic bed transition request shipped from the service layer to the
+/// repository. The repository is responsible for executing every check
+/// (state-machine, patient existence, occupancy invariants, target-bed
+/// eligibility for transfer/swap) and every mutation (bed state updates,
+/// occupancy rows, audit-shaped bed_event row) inside a SINGLE database
+/// transaction. If any prerequisite fails, the transaction rolls back and
+/// the underlying state is left untouched.
+#[derive(Debug, Clone)]
+pub struct BedTransitionDbRequest {
+    pub bed_id: i64,
+    pub action: String,
+    pub target_state: String,
+    pub related_bed_id: Option<i64>,
+    pub patient_id: Option<i64>,
+    pub note: String,
+    pub actor_id: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct AttachmentStorageRecord {
     pub mime_type: String,
@@ -156,6 +174,11 @@ pub trait AppRepository: Send + Sync {
     async fn check_in_patient(&self, bed_id: i64, patient_id: i64) -> Result<(), ApiError>;
     async fn check_out_patient(&self, bed_id: i64, reason: &str) -> Result<(), ApiError>;
     async fn active_bed_occupant(&self, bed_id: i64) -> Result<Option<i64>, ApiError>;
+    /// Atomically apply a bed transition. The implementation MUST run all
+    /// validation and mutation inside a single database transaction so a
+    /// failed prerequisite leaves the bed state and occupancy records
+    /// untouched.
+    async fn apply_bed_transition(&self, req: BedTransitionDbRequest) -> Result<(), ApiError>;
 
     async fn create_menu(&self, menu_date: &str, meal_period: &str, item_name: &str, calories: i32, actor_id: i64) -> Result<(), ApiError>;
     async fn list_menus(&self) -> Result<Vec<DiningMenuDto>, ApiError>;

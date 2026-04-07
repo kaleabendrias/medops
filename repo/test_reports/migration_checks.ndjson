@@ -1,5 +1,5 @@
-{"suite":"migration_checks","case":"migrations_applied","status":"pass","detail":"all 20 of 20 migrations applied successfully"}
-{"suite":"migration_checks","case":"latest_migration_version","status":"pass","detail":"latest migration version is 20"}
+{"suite":"migration_checks","case":"migrations_applied","status":"pass","detail":"all 21 of 21 migrations applied successfully"}
+{"suite":"migration_checks","case":"latest_migration_version","status":"pass","detail":"latest migration version is 21"}
 {"suite":"migration_checks","case":"password_hash_column_size","status":"pass","detail":"users.password_hash supports Argon2id payloads"}
 {"suite":"migration_checks","case":"seed_users_present","status":"pass","detail":"seeded users present"}
 {"suite":"migration_checks","case":"campaign_deadline_schema","status":"pass","detail":"campaign deadline column present"}

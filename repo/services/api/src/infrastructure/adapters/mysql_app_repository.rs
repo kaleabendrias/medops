@@ -20,8 +20,8 @@ use contracts::{
 use crate::contracts::ApiError;
 use crate::infrastructure::security::field_crypto::FieldCrypto;
 use crate::repositories::app_repository::{
-    AppRepository, AttachmentStorageRecord, OrderRecord, PatientSensitiveRecord, SessionRecord,
-    UserAuthRecord,
+    AppRepository, AttachmentStorageRecord, BedTransitionDbRequest, OrderRecord,
+    PatientSensitiveRecord, SessionRecord, UserAuthRecord,
 };
 
 pub struct MySqlAppRepository {
@@ -59,16 +59,46 @@ impl MySqlAppRepository {
         hex::encode(hasher.finalize())
     }
 
-    fn role_has_global_patient_access(role_name: &str) -> bool {
-        matches!(role_name, "admin" | "auditor")
+    /// Capability check for "this role can see/operate on patients owned by
+    /// any user, not just the ones it has been individually assigned to".
+    /// Backed by the `role_permissions` table — see migration 021 for the
+    /// seed that grants `patient.global_access` to admin/auditor.
+    async fn has_global_patient_access(&self, role_name: &str) -> Result<bool, ApiError> {
+        self.user_has_permission(role_name, "patient.global_access").await
     }
 
-    fn role_has_global_order_access(role_name: &str) -> bool {
-        matches!(role_name, "admin" | "auditor" | "employee")
+    /// Capability check for "this role can see/operate on dining orders
+    /// created by any user". Backed by `order.global_access` in
+    /// `role_permissions` (admin / auditor / employee, per migration 010
+    /// and 021).
+    async fn has_global_order_access(&self, role_name: &str) -> Result<bool, ApiError> {
+        self.user_has_permission(role_name, "order.global_access").await
     }
 
-    fn role_has_global_ingestion_access(role_name: &str) -> bool {
-        matches!(role_name, "admin" | "auditor")
+    /// Capability check for "this role can see/operate on ingestion tasks
+    /// created by any user". Backed by `ingestion.global_access` in
+    /// `role_permissions` (admin / auditor, per migration 021).
+    async fn has_global_ingestion_access(&self, role_name: &str) -> Result<bool, ApiError> {
+        self.user_has_permission(role_name, "ingestion.global_access").await
+    }
+
+    /// Stateless bed state-machine validation. Re-used by both the service
+    /// layer (for early-fail UX) and the repository layer (re-checked
+    /// inside the atomic transition transaction so concurrent state changes
+    /// can never sneak past).
+    fn validate_bed_state_transition(current: &str, target: &str) -> Result<(), ApiError> {
+        let valid: &[&str] = match current {
+            "Available" => &["Reserved", "Occupied", "Out of Service"],
+            "Reserved" => &["Occupied", "Available", "Out of Service"],
+            "Occupied" => &["Cleaning", "Reserved"],
+            "Cleaning" => &["Available", "Out of Service"],
+            "Out of Service" => &["Available"],
+            _ => return Err(ApiError::bad_request("Unknown current bed state")),
+        };
+        if !valid.contains(&target) {
+            return Err(ApiError::bad_request("Invalid bed state transition"));
+        }
+        Ok(())
     }
 
     fn next_run_iso(schedule_cron: &str) -> Result<String, ApiError> {
@@ -177,24 +207,77 @@ impl MySqlAppRepository {
         "/var/lib/rocket-api/ingestion",
     ];
 
-    fn is_allowed_file_path(path: &str) -> bool {
-        // Reject path traversal attempts
-        let canonical = std::path::Path::new(path);
-        for component in canonical.components() {
+    /// Synchronous, syntactic-only sanity check on a file:// path. This
+    /// rejects the obvious classes of bad input — relative paths, ParentDir
+    /// segments, sibling-prefix bypasses against the configured base
+    /// directories — but it does NOT touch the filesystem and therefore
+    /// cannot detect symlink escapes. The strong, IO-backed check lives in
+    /// `canonical_allowed_file_path` and runs before the file is opened.
+    fn is_syntactic_allowed_file_path(path: &str) -> bool {
+        let p = std::path::Path::new(path);
+        if !p.is_absolute() {
+            return false;
+        }
+        for component in p.components() {
             if matches!(component, std::path::Component::ParentDir) {
                 return false;
             }
         }
-        // Reject if the resolved path contains ".." anywhere (belt-and-suspenders)
-        if path.contains("..") {
-            return false;
+        // `Path::starts_with` is COMPONENT-AWARE, so the
+        // sibling-prefix attack
+        //   /app/config/ingestion_fixture_secret/x.json
+        // does NOT match
+        //   /app/config/ingestion_fixture
+        // unlike a raw `str::starts_with` test.
+        Self::FILE_ALLOWED_BASES
+            .iter()
+            .any(|base| p.starts_with(std::path::Path::new(base)))
+    }
+
+    /// Strong, IO-backed validation of a file:// path: canonicalize the
+    /// requested path AND each authorized base directory, then verify that
+    /// the resolved path lives inside one of the resolved bases. Because
+    /// `tokio::fs::canonicalize` follows symlinks, this defeats both
+    /// path-traversal and symlink-escape attacks (e.g. a fixture file that
+    /// is actually a symlink to /etc/passwd will canonicalize to
+    /// /etc/passwd and be rejected by the boundary check).
+    async fn canonical_allowed_file_path(
+        path: &str,
+    ) -> Result<std::path::PathBuf, ApiError> {
+        if !Self::is_syntactic_allowed_file_path(path) {
+            return Err(ApiError::bad_request(
+                "Seed file path is outside the approved ingestion directories",
+            ));
         }
-        Self::FILE_ALLOWED_BASES.iter().any(|base| path.starts_with(base))
+        let resolved = tokio::fs::canonicalize(path).await.map_err(|_| {
+            ApiError::bad_request("Seed file does not exist or is not accessible")
+        })?;
+        let mut resolved_bases: Vec<std::path::PathBuf> = Vec::new();
+        for base in Self::FILE_ALLOWED_BASES {
+            if let Ok(c) = tokio::fs::canonicalize(base).await {
+                resolved_bases.push(c);
+            }
+        }
+        if resolved_bases.is_empty() {
+            return Err(ApiError::bad_request(
+                "No ingestion source directories are configured on this host",
+            ));
+        }
+        let inside = resolved_bases.iter().any(|b| resolved.starts_with(b));
+        if !inside {
+            return Err(ApiError::bad_request(
+                "Resolved seed file path escapes approved ingestion directories",
+            ));
+        }
+        Ok(resolved)
     }
 
     fn is_allowed_intranet_url(url: &str) -> bool {
         if let Some(path) = url.strip_prefix("file://") {
-            return Self::is_allowed_file_path(path);
+            // Cheap syntactic gate; the strong IO-backed check is enforced
+            // at the actual fetch boundary in `fetch_source`, which is the
+            // only place a file is ever opened.
+            return Self::is_syntactic_allowed_file_path(path);
         }
         if let Ok(parsed) = reqwest::Url::parse(url) {
             if parsed.scheme() != "http" && parsed.scheme() != "https" {
@@ -210,16 +293,21 @@ impl MySqlAppRepository {
     }
 
     async fn fetch_source(url: &str) -> Result<String, ApiError> {
+        if let Some(path) = url.strip_prefix("file://") {
+            // STRONG, IO-backed boundary check before any file is opened.
+            // This canonicalizes both the requested path and the configured
+            // base directories and rejects symlink escapes, sibling-prefix
+            // bypasses, and traversal sequences.
+            let canonical = Self::canonical_allowed_file_path(path).await?;
+            return tokio::fs::read_to_string(canonical).await.map_err(|_| {
+                ApiError::bad_request("Unable to read seed URL file")
+            });
+        }
+
         if !Self::is_allowed_intranet_url(url) {
             return Err(ApiError::bad_request(
                 "Seed URL must use file:// within approved directories or target an approved intranet host (localhost, *.local, *.internal, or Docker service names). Public internet URLs and path traversal are not permitted.",
             ));
-        }
-
-        if let Some(path) = url.strip_prefix("file://") {
-            return tokio::fs::read_to_string(path)
-                .await
-                .map_err(|_| ApiError::bad_request("Unable to read seed URL file"));
         }
 
         let client = reqwest::Client::builder()
@@ -687,7 +775,7 @@ impl AppRepository for MySqlAppRepository {
     }
 
     async fn can_access_patient(&self, user_id: i64, role_name: &str, patient_id: i64) -> Result<bool, ApiError> {
-        if Self::role_has_global_patient_access(role_name) {
+        if self.has_global_patient_access(role_name).await? {
             let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM patients WHERE id = ?")
                 .bind(patient_id)
                 .fetch_one(&self.pool)
@@ -763,7 +851,7 @@ impl AppRepository for MySqlAppRepository {
     async fn list_patients(&self, user_id: i64, role_name: &str, limit: i64, offset: i64) -> Result<Vec<PatientProfileDto>, ApiError> {
         let safe_limit = limit.clamp(1, 100);
         let safe_offset = offset.max(0);
-        let rows = if Self::role_has_global_patient_access(role_name) {
+        let rows = if self.has_global_patient_access(role_name).await? {
             sqlx::query_as::<_, (i64, String, String, String, String, String, String, String, String, String, String, String, String, String, String)>(
                 "SELECT id, mrn, first_name, last_name, birth_date, gender, phone, email,
                         COALESCE(mrn_cipher,''), COALESCE(allergies_cipher,''), COALESCE(contraindications_cipher,''), COALESCE(history_cipher,''),
@@ -1128,6 +1216,286 @@ impl AppRepository for MySqlAppRepository {
         Ok(row)
     }
 
+    async fn apply_bed_transition(
+        &self,
+        req: BedTransitionDbRequest,
+    ) -> Result<(), ApiError> {
+        // Validate-then-mutate inside ONE transaction. Every read uses
+        // `FOR UPDATE` so concurrent writers are serialized on the affected
+        // bed rows, and every prerequisite is verified BEFORE any UPDATE /
+        // INSERT lands. If any check fails the whole transaction is dropped
+        // and the underlying state is left untouched.
+        let mut tx = self.pool.begin().await.map_err(|_| ApiError::Internal)?;
+
+        let action = req.action.trim();
+        let target_state = req.target_state.trim();
+        let note = req.note.trim();
+
+        // ── Step 1: lock and read source bed state ─────────────────────
+        let current_state: Option<String> = sqlx::query_scalar(
+            "SELECT state FROM beds WHERE id = ? FOR UPDATE",
+        )
+        .bind(req.bed_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let current_state = match current_state {
+            Some(s) => s,
+            None => return Err(ApiError::NotFound),
+        };
+
+        // ── Step 2: re-validate the state machine under the lock ───────
+        Self::validate_bed_state_transition(&current_state, target_state)?;
+
+        // ── Step 3: action-specific prerequisite checks ────────────────
+        let active_occupant: Option<i64> = sqlx::query_scalar(
+            "SELECT patient_id FROM bed_occupancies
+             WHERE bed_id = ? AND checked_out_at IS NULL
+             LIMIT 1 FOR UPDATE",
+        )
+        .bind(req.bed_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let mut target_locked_state: Option<String> = None;
+        let mut target_active_occupant: Option<i64> = None;
+        if let Some(target_bed) = req.related_bed_id {
+            let s: Option<String> = sqlx::query_scalar(
+                "SELECT state FROM beds WHERE id = ? FOR UPDATE",
+            )
+            .bind(target_bed)
+            .fetch_optional(&mut *tx)
+            .await?;
+            match s {
+                Some(s) => target_locked_state = Some(s),
+                None => return Err(ApiError::NotFound),
+            }
+            target_active_occupant = sqlx::query_scalar(
+                "SELECT patient_id FROM bed_occupancies
+                 WHERE bed_id = ? AND checked_out_at IS NULL
+                 LIMIT 1 FOR UPDATE",
+            )
+            .bind(target_bed)
+            .fetch_optional(&mut *tx)
+            .await?;
+        }
+
+        match action {
+            "check-in" => {
+                let pid = req.patient_id.ok_or_else(|| {
+                    ApiError::bad_request("patient_id is required for check-in")
+                })?;
+                // Patient must exist; the SELECT FOR UPDATE keeps the row
+                // pinned for the duration of the transaction so a concurrent
+                // delete cannot strand an occupancy referencing a missing
+                // patient.
+                let exists: Option<i64> = sqlx::query_scalar(
+                    "SELECT id FROM patients WHERE id = ? FOR UPDATE",
+                )
+                .bind(pid)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if exists.is_none() {
+                    return Err(ApiError::bad_request(
+                        "Patient referenced by check-in does not exist",
+                    ));
+                }
+                if active_occupant.is_some() {
+                    return Err(ApiError::bad_request(
+                        "Bed already has an active occupant; check the current patient out first",
+                    ));
+                }
+            }
+            "check-out" => {
+                if active_occupant.is_none() {
+                    return Err(ApiError::bad_request(
+                        "Bed has no active occupant to check out",
+                    ));
+                }
+            }
+            "transfer" => {
+                let target_bed = req.related_bed_id.ok_or_else(|| {
+                    ApiError::bad_request("related_bed_id is required for transfer")
+                })?;
+                if target_bed == req.bed_id {
+                    return Err(ApiError::bad_request(
+                        "transfer requires a distinct related_bed_id",
+                    ));
+                }
+                let target_state_now = target_locked_state
+                    .as_deref()
+                    .ok_or(ApiError::Internal)?;
+                Self::validate_bed_state_transition(target_state_now, "Occupied")?;
+                if target_active_occupant.is_some() {
+                    return Err(ApiError::bad_request(
+                        "Target bed already has an active occupant",
+                    ));
+                }
+                if active_occupant.is_none() {
+                    return Err(ApiError::bad_request(
+                        "Source bed has no active occupant to transfer",
+                    ));
+                }
+            }
+            "swap" => {
+                let target_bed = req.related_bed_id.ok_or_else(|| {
+                    ApiError::bad_request("related_bed_id is required for swap")
+                })?;
+                if target_bed == req.bed_id {
+                    return Err(ApiError::bad_request(
+                        "swap requires a distinct related_bed_id",
+                    ));
+                }
+                let target_state_now = target_locked_state
+                    .as_deref()
+                    .ok_or(ApiError::Internal)?;
+                if current_state != "Occupied" || target_state_now != "Occupied" {
+                    return Err(ApiError::bad_request(
+                        "Swap requires both beds to be Occupied",
+                    ));
+                }
+                if active_occupant.is_none() || target_active_occupant.is_none() {
+                    return Err(ApiError::bad_request(
+                        "Swap requires both beds to have active occupants",
+                    ));
+                }
+            }
+            _ => {
+                // Generic transition (no patient/occupancy mutation). The
+                // state-machine validation above is sufficient.
+            }
+        }
+
+        // ── Step 4: every prerequisite passed → apply mutations ────────
+        match action {
+            "check-in" => {
+                let pid = req.patient_id.unwrap();
+                sqlx::query("UPDATE beds SET state = ? WHERE id = ?")
+                    .bind(target_state)
+                    .bind(req.bed_id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(
+                    "INSERT INTO bed_occupancies (bed_id, patient_id, checked_in_at)
+                     VALUES (?, ?, NOW())",
+                )
+                .bind(req.bed_id)
+                .bind(pid)
+                .execute(&mut *tx)
+                .await?;
+            }
+            "check-out" => {
+                sqlx::query("UPDATE beds SET state = ? WHERE id = ?")
+                    .bind(target_state)
+                    .bind(req.bed_id)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query(
+                    "UPDATE bed_occupancies SET checked_out_at = NOW(), checked_out_reason = ?
+                     WHERE bed_id = ? AND checked_out_at IS NULL",
+                )
+                .bind("check-out")
+                .bind(req.bed_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            "transfer" => {
+                let target_bed = req.related_bed_id.unwrap();
+                let occupant = active_occupant.unwrap();
+                // Source: detach occupant, mark Cleaning.
+                sqlx::query(
+                    "UPDATE bed_occupancies SET checked_out_at = NOW(), checked_out_reason = ?
+                     WHERE bed_id = ? AND checked_out_at IS NULL",
+                )
+                .bind("transfer")
+                .bind(req.bed_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query("UPDATE beds SET state = 'Cleaning' WHERE id = ?")
+                    .bind(req.bed_id)
+                    .execute(&mut *tx)
+                    .await?;
+                // Target: attach occupant, mark Occupied.
+                sqlx::query(
+                    "INSERT INTO bed_occupancies (bed_id, patient_id, checked_in_at)
+                     VALUES (?, ?, NOW())",
+                )
+                .bind(target_bed)
+                .bind(occupant)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query("UPDATE beds SET state = 'Occupied' WHERE id = ?")
+                    .bind(target_bed)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            "swap" => {
+                let target_bed = req.related_bed_id.unwrap();
+                let occupant_a = active_occupant.unwrap();
+                let occupant_b = target_active_occupant.unwrap();
+                sqlx::query(
+                    "UPDATE bed_occupancies SET checked_out_at = NOW(), checked_out_reason = ?
+                     WHERE bed_id IN (?, ?) AND checked_out_at IS NULL",
+                )
+                .bind("swap")
+                .bind(req.bed_id)
+                .bind(target_bed)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO bed_occupancies (bed_id, patient_id, checked_in_at)
+                     VALUES (?, ?, NOW())",
+                )
+                .bind(target_bed)
+                .bind(occupant_a)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO bed_occupancies (bed_id, patient_id, checked_in_at)
+                     VALUES (?, ?, NOW())",
+                )
+                .bind(req.bed_id)
+                .bind(occupant_b)
+                .execute(&mut *tx)
+                .await?;
+                // Both beds remain Occupied.
+            }
+            _ => {
+                sqlx::query("UPDATE beds SET state = ? WHERE id = ?")
+                    .bind(target_state)
+                    .bind(req.bed_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+
+        // ── Step 5: append the bed_event row in the same transaction ──
+        let (event_to_state, event_patient): (String, Option<i64>) = match action {
+            "transfer" => ("Occupied".to_string(), active_occupant.or(req.patient_id)),
+            "swap" => ("Occupied".to_string(), active_occupant.or(req.patient_id)),
+            "check-in" => (target_state.to_string(), req.patient_id),
+            "check-out" => (target_state.to_string(), req.patient_id.or(active_occupant)),
+            _ => (target_state.to_string(), req.patient_id),
+        };
+        sqlx::query(
+            "INSERT INTO bed_events
+             (action_type, from_bed_id, to_bed_id, from_state, to_state, patient_id, actor_id, note, occurred_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())",
+        )
+        .bind(action)
+        .bind(req.bed_id)
+        .bind(req.related_bed_id)
+        .bind(&current_state)
+        .bind(&event_to_state)
+        .bind(event_patient)
+        .bind(req.actor_id)
+        .bind(note)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await.map_err(|_| ApiError::Internal)?;
+        Ok(())
+    }
+
     async fn list_bed_events(&self) -> Result<Vec<BedEventDto>, ApiError> {
         let rows = sqlx::query_as::<_, (i64, String, Option<i64>, Option<i64>, Option<String>, Option<String>, String, String)>(
             "SELECT be.id, be.action_type, be.from_bed_id, be.to_bed_id, be.from_state, be.to_state, u.username,
@@ -1372,7 +1740,7 @@ impl AppRepository for MySqlAppRepository {
         let has_self_service = self
             .user_has_permission(role_name, "order.self_service")
             .await?;
-        let rows = if Self::role_has_global_order_access(role_name) {
+        let rows = if self.has_global_order_access(role_name).await? {
             sqlx::query_as::<_, (i64, i64, i64, String, String, i32)>(
                 "SELECT id, patient_id, menu_id, status, notes, version FROM dining_orders ORDER BY id DESC LIMIT ? OFFSET ?",
             )
@@ -1723,7 +2091,7 @@ impl AppRepository for MySqlAppRepository {
         let hash = FieldCrypto::hash_for_lookup(query);
         let safe_limit = limit.clamp(1, 100);
         let safe_offset = offset.max(0);
-        let rows = if Self::role_has_global_patient_access(role_name) {
+        let rows = if self.has_global_patient_access(role_name).await? {
             sqlx::query_as::<_, (i64, String, String, String, String)>(
                 "SELECT id, mrn, first_name, last_name, COALESCE(mrn_cipher,'')
                  FROM patients
@@ -2390,7 +2758,7 @@ impl AppRepository for MySqlAppRepository {
     ) -> Result<i32, ApiError> {
         let schedule_cron = req.schedule_cron.trim().to_string();
         let next_run = Self::next_run_iso(&schedule_cron)?;
-        let current_version = if Self::role_has_global_ingestion_access(actor_role) {
+        let current_version = if self.has_global_ingestion_access(actor_role).await? {
             sqlx::query_scalar::<_, Option<i32>>(
                 "SELECT COALESCE(MAX(version_number), 0) FROM ingestion_task_versions WHERE task_id = ?",
             )
@@ -2426,7 +2794,7 @@ impl AppRepository for MySqlAppRepository {
         .execute(&self.pool)
         .await?;
 
-        let updated = if Self::role_has_global_ingestion_access(actor_role) {
+        let updated = if self.has_global_ingestion_access(actor_role).await? {
             sqlx::query(
                 "UPDATE ingestion_tasks
                  SET active_version = ?, schedule_cron = ?, max_depth = ?, pagination_strategy = ?, incremental_field = ?, next_run_at = STR_TO_DATE(?, '%Y-%m-%dT%H:%i:%sZ'), updated_at = NOW()
@@ -2475,7 +2843,7 @@ impl AppRepository for MySqlAppRepository {
         actor_role: &str,
         req: IngestionTaskRollbackRequest,
     ) -> Result<i32, ApiError> {
-        let target = if Self::role_has_global_ingestion_access(actor_role) {
+        let target = if self.has_global_ingestion_access(actor_role).await? {
             sqlx::query_as::<_, (String, String, String)>(
                 "SELECT v.seed_urls_json, v.extraction_rules_json, t.schedule_cron
                  FROM ingestion_task_versions v
@@ -2503,7 +2871,7 @@ impl AppRepository for MySqlAppRepository {
         };
         let next_run = Self::next_run_iso(&target.2)?;
 
-        let current_version = if Self::role_has_global_ingestion_access(actor_role) {
+        let current_version = if self.has_global_ingestion_access(actor_role).await? {
             sqlx::query_scalar::<_, Option<i32>>(
                 "SELECT COALESCE(MAX(version_number), 0) FROM ingestion_task_versions WHERE task_id = ?",
             )
@@ -2540,7 +2908,7 @@ impl AppRepository for MySqlAppRepository {
         .execute(&self.pool)
         .await?;
 
-        let updated = if Self::role_has_global_ingestion_access(actor_role) {
+        let updated = if self.has_global_ingestion_access(actor_role).await? {
             sqlx::query(
                 "UPDATE ingestion_tasks SET active_version = ?, next_run_at = STR_TO_DATE(?, '%Y-%m-%dT%H:%i:%sZ'), updated_at = NOW() WHERE id = ?",
             )
@@ -2569,7 +2937,7 @@ impl AppRepository for MySqlAppRepository {
     }
 
     async fn run_ingestion_task(&self, task_id: i64, actor_id: i64, actor_role: &str) -> Result<(), ApiError> {
-        let task = if Self::role_has_global_ingestion_access(actor_role) {
+        let task = if self.has_global_ingestion_access(actor_role).await? {
             sqlx::query_as::<_, (i32, i32, String, Option<String>, String, String, Option<String>, String)>(
                 "SELECT CAST(active_version AS SIGNED), max_depth, pagination_strategy, incremental_field,
                         v.seed_urls_json, v.extraction_rules_json, t.last_incremental_value, t.schedule_cron
@@ -2818,7 +3186,7 @@ impl AppRepository for MySqlAppRepository {
     }
 
     async fn list_ingestion_tasks(&self, actor_id: i64, actor_role: &str) -> Result<Vec<IngestionTaskDto>, ApiError> {
-        let rows = if Self::role_has_global_ingestion_access(actor_role) {
+        let rows = if self.has_global_ingestion_access(actor_role).await? {
             sqlx::query_as::<_, (i64, String, String, i32, String, i32, String, Option<String>, Option<String>, Option<String>)>(
                 "SELECT id, task_name, status, COALESCE(active_version,0), schedule_cron, max_depth, pagination_strategy, incremental_field,
                         DATE_FORMAT(next_run_at, '%Y-%m-%d %H:%i:%s'), DATE_FORMAT(last_run_at, '%Y-%m-%d %H:%i:%s')
@@ -2862,7 +3230,7 @@ impl AppRepository for MySqlAppRepository {
         actor_id: i64,
         actor_role: &str,
     ) -> Result<Vec<IngestionTaskVersionDto>, ApiError> {
-        let rows = if Self::role_has_global_ingestion_access(actor_role) {
+        let rows = if self.has_global_ingestion_access(actor_role).await? {
             sqlx::query_as::<_, (i64, i32, String, String, Option<i32>, String)>(
                 "SELECT task_id, version_number, seed_urls_json, extraction_rules_json, rollback_of_version,
                         DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s')
@@ -2908,7 +3276,7 @@ impl AppRepository for MySqlAppRepository {
         actor_role: &str,
     ) -> Result<Vec<IngestionTaskRunDto>, ApiError> {
         let safe_limit = limit.clamp(1, 100);
-        let rows = if Self::role_has_global_ingestion_access(actor_role) {
+        let rows = if self.has_global_ingestion_access(actor_role).await? {
             sqlx::query_as::<_, (i64, i64, i32, String, String, Option<String>, i32, String)>(
                 "SELECT id, task_id, task_version, status,
                         DATE_FORMAT(started_at, '%Y-%m-%d %H:%i:%s'),

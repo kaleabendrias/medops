@@ -27,7 +27,7 @@ use sha2::Digest;
 
 use crate::contracts::{ApiError, AuthUser};
 use crate::config::{AuthPolicyConfig, RetentionConfig};
-use crate::repositories::app_repository::{AppRepository, OrderRecord};
+use crate::repositories::app_repository::{AppRepository, BedTransitionDbRequest, OrderRecord};
 
 #[derive(Clone)]
 pub struct AppService {
@@ -719,112 +719,36 @@ impl AppService {
 
     pub async fn transition_bed(&self, user: &AuthUser, bed_id: i64, req: BedTransitionRequest) -> Result<(), ApiError> {
         self.authorize(user, "bedboard.write").await?;
-        let current = self.repo.get_bed_state(bed_id).await?.ok_or(ApiError::NotFound)?;
-        Self::validate_bed_transition(&current, &req.target_state)?;
-        self.repo.set_bed_state(bed_id, req.target_state.trim()).await?;
 
-        match (req.action.as_str(), req.related_bed_id) {
-            ("check-in", _) => {
-                let patient_id = req.patient_id.ok_or_else(|| {
-                    ApiError::bad_request("patient_id is required for check-in")
-                })?;
-                self.repo.check_in_patient(bed_id, patient_id).await?;
-                self.repo
-                    .record_bed_event(
-                        "check-in",
-                        Some(bed_id),
-                        None,
-                        Some(&current),
-                        Some(req.target_state.trim()),
-                        user.user_id,
-                        req.note.trim(),
-                        Some(patient_id),
-                    )
-                    .await?;
-            }
-            ("check-out", _) => {
-                self.repo.check_out_patient(bed_id, "check-out").await?;
-                self.repo
-                    .record_bed_event(
-                        "check-out",
-                        Some(bed_id),
-                        None,
-                        Some(&current),
-                        Some(req.target_state.trim()),
-                        user.user_id,
-                        req.note.trim(),
-                        req.patient_id.or(self.repo.active_bed_occupant(bed_id).await?),
-                    )
-                    .await?;
-            }
-            ("transfer", Some(target)) => {
-                let target_state = self.repo.get_bed_state(target).await?.ok_or(ApiError::NotFound)?;
-                Self::validate_bed_transition(&target_state, "Occupied")?;
-                // Move occupant from source bed to target bed
-                let occupant = self.repo.active_bed_occupant(bed_id).await?;
-                self.repo.check_out_patient(bed_id, "transfer").await?;
-                if let Some(pid) = occupant {
-                    self.repo.check_in_patient(target, pid).await?;
-                }
-                self.repo.set_bed_state(target, "Occupied").await?;
-                self.repo.set_bed_state(bed_id, "Cleaning").await?;
-                self.repo
-                    .record_bed_event(
-                        "transfer",
-                        Some(bed_id),
-                        Some(target),
-                        Some(&current),
-                        Some("Occupied"),
-                        user.user_id,
-                        req.note.trim(),
-                        occupant.or(req.patient_id),
-                    )
-                    .await?;
-            }
-            ("swap", Some(target)) => {
-                let target_state = self.repo.get_bed_state(target).await?.ok_or(ApiError::NotFound)?;
-                if current != "Occupied" || target_state != "Occupied" {
-                    return Err(ApiError::bad_request("Swap requires both beds to be Occupied"));
-                }
-                // Swap occupants between the two beds
-                let occupant_a = self.repo.active_bed_occupant(bed_id).await?;
-                let occupant_b = self.repo.active_bed_occupant(target).await?;
-                self.repo.check_out_patient(bed_id, "swap").await?;
-                self.repo.check_out_patient(target, "swap").await?;
-                if let Some(pid) = occupant_a {
-                    self.repo.check_in_patient(target, pid).await?;
-                }
-                if let Some(pid) = occupant_b {
-                    self.repo.check_in_patient(bed_id, pid).await?;
-                }
-                self.repo
-                    .record_bed_event(
-                        "swap",
-                        Some(bed_id),
-                        Some(target),
-                        Some("Occupied"),
-                        Some("Occupied"),
-                        user.user_id,
-                        req.note.trim(),
-                        occupant_a.or(req.patient_id),
-                    )
-                    .await?;
-            }
-            _ => {
-                self.repo
-                    .record_bed_event(
-                        req.action.trim(),
-                        Some(bed_id),
-                        None,
-                        Some(&current),
-                        Some(req.target_state.trim()),
-                        user.user_id,
-                        req.note.trim(),
-                        req.patient_id,
-                    )
-                    .await?;
-            }
+        // Cheap, stateless pre-flight: catch obviously-malformed transitions
+        // (unknown current state, illegal target) without paying for a DB
+        // round-trip. The repository re-validates everything inside the
+        // transaction, so this is purely a UX optimisation — it CANNOT be
+        // relied on for correctness.
+        if let Some(current) = self.repo.get_bed_state(bed_id).await? {
+            Self::validate_bed_transition(&current, &req.target_state)?;
+        } else {
+            return Err(ApiError::NotFound);
         }
+
+        // Hand the request off to the atomic repository entry point, which
+        // re-locks the affected rows, re-validates the state machine,
+        // verifies action-specific prerequisites (patient existence,
+        // occupancy invariants, target-bed eligibility for transfer/swap),
+        // and applies every mutation inside ONE transaction. A failure at
+        // any step rolls the whole transaction back, so the caller can
+        // never observe a partially-applied transition.
+        self.repo
+            .apply_bed_transition(BedTransitionDbRequest {
+                bed_id,
+                action: req.action.clone(),
+                target_state: req.target_state.clone(),
+                related_bed_id: req.related_bed_id,
+                patient_id: req.patient_id,
+                note: req.note.clone(),
+                actor_id: user.user_id,
+            })
+            .await?;
 
         self.repo
             .append_audit(
