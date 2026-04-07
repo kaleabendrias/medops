@@ -49,6 +49,16 @@ impl MySqlAppRepository {
         }
     }
 
+    /// Hash a session bearer token using SHA-256 and return the hex digest.
+    /// The plaintext token is generated client-side and never persisted; only
+    /// this digest goes to the database, so a read of the `sessions` table
+    /// cannot be replayed against the API to hijack a session.
+    fn hash_session_token(token: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
     fn role_has_global_patient_access(role_name: &str) -> bool {
         matches!(role_name, "admin" | "auditor")
     }
@@ -495,11 +505,14 @@ impl AppRepository for MySqlAppRepository {
     }
 
     async fn create_session(&self, token: &str, user_id: i64) -> Result<(), ApiError> {
+        // Persist only the SHA-256 digest of the bearer token. The raw token
+        // is returned to the caller in-process and never stored.
+        let token_hash = Self::hash_session_token(token);
         sqlx::query(
-            "INSERT INTO sessions (session_token, user_id, created_at, last_activity_at, revoked_at)
+            "INSERT INTO sessions (session_token_hash, user_id, created_at, last_activity_at, revoked_at)
              VALUES (?, ?, NOW(), NOW(), NULL)",
         )
-        .bind(token)
+        .bind(token_hash)
         .bind(user_id)
         .execute(&self.pool)
         .await?;
@@ -507,16 +520,19 @@ impl AppRepository for MySqlAppRepository {
     }
 
     async fn get_session(&self, token: &str) -> Result<Option<SessionRecord>, ApiError> {
+        // Hash the inbound bearer token before comparing against the column,
+        // so the raw token never appears in the SQL parameter set.
+        let token_hash = Self::hash_session_token(token);
         let row = sqlx::query_as::<_, (i64, String, String, bool, i32)>(
             "SELECT u.id, u.username, r.name, u.is_disabled,
              CASE WHEN TIMESTAMPDIFF(MINUTE, s.last_activity_at, NOW()) >= ? THEN 1 ELSE 0 END AS inactive_expired
              FROM sessions s
              JOIN users u ON u.id = s.user_id
              JOIN roles r ON r.id = u.role_id
-             WHERE s.session_token = ? AND s.revoked_at IS NULL",
+             WHERE s.session_token_hash = ? AND s.revoked_at IS NULL",
         )
         .bind(self.session_inactivity_minutes)
-        .bind(token)
+        .bind(token_hash)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -532,8 +548,9 @@ impl AppRepository for MySqlAppRepository {
     }
 
     async fn touch_session(&self, token: &str) -> Result<(), ApiError> {
-        sqlx::query("UPDATE sessions SET last_activity_at = NOW() WHERE session_token = ? AND revoked_at IS NULL")
-            .bind(token)
+        let token_hash = Self::hash_session_token(token);
+        sqlx::query("UPDATE sessions SET last_activity_at = NOW() WHERE session_token_hash = ? AND revoked_at IS NULL")
+            .bind(token_hash)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -1169,6 +1186,83 @@ impl AppRepository for MySqlAppRepository {
             .collect())
     }
 
+    async fn validate_menu_orderable(&self, menu_id: i64) -> Result<(), ApiError> {
+        // Pre-flight menu governance enforcement for the order creation flow.
+        //
+        // We treat `dining_menus` as the "menu line" and the matching `dishes`
+        // row (joined by name) as the governing dish record. The order is
+        // only allowed to be committed when ALL of the following hold:
+        //
+        //   1. The menu line exists.
+        //   2. A `dishes` row is actively linked to the menu line by name.
+        //   3. dishes.is_published = TRUE.
+        //   4. dishes.is_sold_out  = FALSE.
+        //   5. The current server clock-time falls inside at least one
+        //      configured `dish_sales_windows` row for that dish.
+        //
+        // Each violation maps to an explicit 400/403 so the frontend can
+        // surface a precise reason and so abuse attempts (e.g. ordering a
+        // sold-out item via a hand-crafted curl) are blocked at the service
+        // boundary rather than relying on database integrity to fail late.
+
+        // Step 1 — does the menu line exist at all?
+        let menu_row = sqlx::query_as::<_, (String,)>(
+            "SELECT item_name FROM dining_menus WHERE id = ?",
+        )
+        .bind(menu_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let item_name = match menu_row {
+            Some((name,)) => name,
+            None => return Err(ApiError::bad_request("Menu line does not exist")),
+        };
+
+        // Step 2 — find the governing dish row (linked by exact name match).
+        let dish_row = sqlx::query_as::<_, (i64, bool, bool)>(
+            "SELECT id, is_published, is_sold_out FROM dishes WHERE name = ? LIMIT 1",
+        )
+        .bind(&item_name)
+        .fetch_optional(&self.pool)
+        .await?;
+        let (dish_id, is_published, is_sold_out) = match dish_row {
+            Some(v) => v,
+            None => {
+                return Err(ApiError::bad_request(
+                    "Menu item is not linked to an active dish",
+                ));
+            }
+        };
+
+        // Step 3 — must be published.
+        if !is_published {
+            return Err(ApiError::Forbidden);
+        }
+
+        // Step 4 — must not be sold out.
+        if is_sold_out {
+            return Err(ApiError::Forbidden);
+        }
+
+        // Step 5 — must be inside at least one configured sales window.
+        // dish_sales_windows stores start_hhmm/end_hhmm as zero-padded
+        // 'HH:MM'; the lexicographic BETWEEN comparison is therefore
+        // correct, and inclusive on both ends so a window of
+        // '00:00'..'23:59' represents an "always on" SKU.
+        let in_window = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(1) FROM dish_sales_windows
+             WHERE dish_id = ?
+               AND DATE_FORMAT(NOW(), '%H:%i') BETWEEN start_hhmm AND end_hhmm",
+        )
+        .bind(dish_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if in_window == 0 {
+            return Err(ApiError::Forbidden);
+        }
+
+        Ok(())
+    }
+
     async fn create_order(&self, patient_id: i64, menu_id: i64, notes: &str, actor_id: i64) -> Result<i64, ApiError> {
         self.create_order_idempotent(patient_id, menu_id, notes, actor_id, None)
             .await
@@ -1334,25 +1428,117 @@ impl AppRepository for MySqlAppRepository {
         payload_json: &str,
         actor_id: i64,
     ) -> Result<i64, ApiError> {
-        let result = sqlx::query(
-            "INSERT INTO governance_records
-             (tier, lineage_source_id, lineage_metadata, payload_json, tombstoned, tombstone_reason, created_by, created_at)
-             VALUES (?, ?, ?, ?, FALSE, NULL, ?, NOW())",
-        )
-        .bind(tier)
-        .bind(lineage_source_id)
-        .bind(lineage_metadata)
-        .bind(payload_json)
-        .bind(actor_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(result.last_insert_id() as i64)
+        // Three distinct physical tables: governance_raw, governance_cleaned,
+        // governance_analytics. Each tier above raw REQUIRES a lineage_source_id
+        // pointing at the immediately lower tier; the database FKs reject any
+        // value that doesn't reference a real row in that lower tier.
+        //
+        // To keep ids globally unique across the three tables (so the public
+        // /governance/records/{id} surface stays unambiguous), every insert
+        // first allocates an id from the shared `governance_id_sequence`
+        // table and then stores it as the PK of the chosen tier table.
+        let mut tx = self.pool.begin().await.map_err(|_| ApiError::Internal)?;
+
+        let allocated = sqlx::query("INSERT INTO governance_id_sequence () VALUES ()")
+            .execute(&mut *tx)
+            .await?;
+        let new_id = allocated.last_insert_id() as i64;
+
+        match tier {
+            "raw" => {
+                if lineage_source_id.is_some() {
+                    return Err(ApiError::bad_request(
+                        "raw governance records must not declare a lineage source",
+                    ));
+                }
+                sqlx::query(
+                    "INSERT INTO governance_raw
+                     (id, lineage_metadata, payload_json, tombstoned, tombstone_reason, created_by, created_at)
+                     VALUES (?, ?, ?, FALSE, NULL, ?, NOW())",
+                )
+                .bind(new_id)
+                .bind(lineage_metadata)
+                .bind(payload_json)
+                .bind(actor_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            "cleaned" => {
+                let source = lineage_source_id.ok_or_else(|| {
+                    ApiError::bad_request(
+                        "cleaned governance records require a lineage source from governance_raw",
+                    )
+                })?;
+                sqlx::query(
+                    "INSERT INTO governance_cleaned
+                     (id, lineage_source_id, lineage_metadata, payload_json, tombstoned, tombstone_reason, created_by, created_at)
+                     VALUES (?, ?, ?, ?, FALSE, NULL, ?, NOW())",
+                )
+                .bind(new_id)
+                .bind(source)
+                .bind(lineage_metadata)
+                .bind(payload_json)
+                .bind(actor_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| {
+                    ApiError::bad_request(
+                        "lineage_source_id does not reference an existing governance_raw row",
+                    )
+                })?;
+            }
+            "analytics" => {
+                let source = lineage_source_id.ok_or_else(|| {
+                    ApiError::bad_request(
+                        "analytics governance records require a lineage source from governance_cleaned",
+                    )
+                })?;
+                sqlx::query(
+                    "INSERT INTO governance_analytics
+                     (id, lineage_source_id, lineage_metadata, payload_json, tombstoned, tombstone_reason, created_by, created_at)
+                     VALUES (?, ?, ?, ?, FALSE, NULL, ?, NOW())",
+                )
+                .bind(new_id)
+                .bind(source)
+                .bind(lineage_metadata)
+                .bind(payload_json)
+                .bind(actor_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| {
+                    ApiError::bad_request(
+                        "lineage_source_id does not reference an existing governance_cleaned row",
+                    )
+                })?;
+            }
+            _ => {
+                return Err(ApiError::bad_request(
+                    "tier must be raw, cleaned, or analytics",
+                ));
+            }
+        }
+
+        tx.commit().await.map_err(|_| ApiError::Internal)?;
+        Ok(new_id)
     }
 
     async fn list_governance_records(&self) -> Result<Vec<GovernanceRecordDto>, ApiError> {
+        // UNION ALL across the three physical tier tables. Each branch
+        // synthesizes the `tier` discriminator and aligns the column shape
+        // (raw rows have no lineage_source_id, hence the NULL cast).
         let rows = sqlx::query_as::<_, (i64, String, Option<i64>, String, String, bool)>(
-            "SELECT id, tier, lineage_source_id, lineage_metadata, payload_json, tombstoned
-             FROM governance_records ORDER BY id DESC",
+            "SELECT id, 'raw' AS tier, CAST(NULL AS SIGNED) AS lineage_source_id,
+                    lineage_metadata, payload_json, tombstoned
+               FROM governance_raw
+             UNION ALL
+             SELECT id, 'cleaned' AS tier, lineage_source_id,
+                    lineage_metadata, payload_json, tombstoned
+               FROM governance_cleaned
+             UNION ALL
+             SELECT id, 'analytics' AS tier, lineage_source_id,
+                    lineage_metadata, payload_json, tombstoned
+               FROM governance_analytics
+             ORDER BY id DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1371,13 +1557,44 @@ impl AppRepository for MySqlAppRepository {
     }
 
     async fn tombstone_governance_record(&self, record_id: i64, reason: &str) -> Result<(), ApiError> {
-        sqlx::query(
-            "UPDATE governance_records SET tombstoned = TRUE, tombstone_reason = ? WHERE id = ?",
+        // Ids are globally unique across the three tier tables (allocated
+        // from `governance_id_sequence`), so we just attempt the UPDATE in
+        // each table and stop at the first one that hits a row.
+        let raw = sqlx::query(
+            "UPDATE governance_raw SET tombstoned = TRUE, tombstone_reason = ? WHERE id = ?",
         )
         .bind(reason)
         .bind(record_id)
         .execute(&self.pool)
-        .await?;
+        .await?
+        .rows_affected();
+        if raw > 0 {
+            return Ok(());
+        }
+
+        let cleaned = sqlx::query(
+            "UPDATE governance_cleaned SET tombstoned = TRUE, tombstone_reason = ? WHERE id = ?",
+        )
+        .bind(reason)
+        .bind(record_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if cleaned > 0 {
+            return Ok(());
+        }
+
+        let analytics = sqlx::query(
+            "UPDATE governance_analytics SET tombstoned = TRUE, tombstone_reason = ? WHERE id = ?",
+        )
+        .bind(reason)
+        .bind(record_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if analytics == 0 {
+            return Err(ApiError::NotFound);
+        }
         Ok(())
     }
 

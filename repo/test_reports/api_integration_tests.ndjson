@@ -44,6 +44,8 @@
 {"suite":"api_integration_tests","case":"bed_state_machine_legal_transition","status":"pass","detail":"received 200"}
 {"suite":"api_integration_tests","case":"bed_state_machine_illegal_transition","status":"pass","detail":"received 400"}
 {"suite":"api_integration_tests","case":"campaign_dish_create","status":"pass","detail":"received 200"}
+{"suite":"api_integration_tests","case":"campaign_dish_publish","status":"pass","detail":"received 200"}
+{"suite":"api_integration_tests","case":"campaign_dish_sales_window","status":"pass","detail":"received 200"}
 {"suite":"api_integration_tests","case":"campaign_menu_create","status":"pass","detail":"received 200"}
 {"suite":"api_integration_tests","case":"campaign_create_with_deadline","status":"pass","detail":"received 200"}
 {"suite":"api_integration_tests","case":"campaign_join_admin","status":"pass","detail":"received 200"}
@@ -61,6 +63,9 @@
 {"suite":"api_integration_tests","case":"patient_export_json","status":"pass","detail":"received 200"}
 {"suite":"api_integration_tests","case":"patient_export_csv","status":"pass","detail":"received 200"}
 {"suite":"api_integration_tests","case":"patient_export_audit_logged","status":"pass","detail":"patient export workflow emits audit records"}
+{"suite":"api_integration_tests","case":"test_meal_dish_create","status":"pass","detail":"received 200"}
+{"suite":"api_integration_tests","case":"test_meal_dish_publish","status":"pass","detail":"received 200"}
+{"suite":"api_integration_tests","case":"test_meal_dish_sales_window","status":"pass","detail":"received 200"}
 {"suite":"api_integration_tests","case":"menu_create","status":"pass","detail":"received 200"}
 {"suite":"api_integration_tests","case":"order_create","status":"pass","detail":"received 200"}
 {"suite":"api_integration_tests","case":"create_patient_for_cross_user_order_checks","status":"pass","detail":"received 200"}
@@ -104,7 +109,7 @@
 {"suite":"api_integration_tests","case":"order_note_visible","status":"pass","detail":"order notes timeline returns operation history entries"}
 {"suite":"api_integration_tests","case":"order_note_audit_logged","status":"pass","detail":"order note emits audit record with actor and target metadata"}
 {"suite":"api_integration_tests","case":"audit_append_only_trigger_action","status":"pass","detail":"received 200"}
-{"suite":"api_integration_tests","case":"audit_append_only_growth","status":"pass","detail":"audit log count increased from 152 to 153"}
+{"suite":"api_integration_tests","case":"audit_append_only_growth","status":"pass","detail":"audit log count increased from 157 to 158"}
 {"suite":"api_integration_tests","case":"audit_api_update_rejected","status":"pass","detail":"audit update endpoint explicitly rejects tampering"}
 {"suite":"api_integration_tests","case":"audit_api_delete_rejected","status":"pass","detail":"audit delete endpoint explicitly rejects tampering"}
 {"suite":"api_integration_tests","case":"audit_db_update_trigger","status":"pass","detail":"database trigger rejects direct audit UPDATE"}

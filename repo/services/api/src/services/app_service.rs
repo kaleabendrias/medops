@@ -889,6 +889,13 @@ impl AppService {
         if !patient_access {
             return Err(ApiError::Forbidden);
         }
+        // Strict pre-flight menu governance check. The repository confirms
+        // that the menu line is for today, that the linked dish is published,
+        // not sold out, and that the current server time falls inside an
+        // active sales window. Any failure aborts the order before it ever
+        // touches dining_orders, so neither staff nor self-service members
+        // can bypass dining availability rules.
+        self.repo.validate_menu_orderable(req.menu_id).await?;
         let order_id = self
             .repo
             .create_order_idempotent(

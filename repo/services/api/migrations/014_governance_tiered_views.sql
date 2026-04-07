@@ -1,58 +1,76 @@
--- Governance Tiered Storage Architecture
+-- Governance Tiered Storage — three distinct physical tables.
 --
--- Design decision: governance_records uses a single physical table with a `tier`
--- discriminator column rather than separate tables per tier. This is an accepted
--- architectural choice for the following reasons:
+-- Earlier revisions of this migration kept governance records in a single
+-- `governance_records` table with a `tier` discriminator and surfaced each
+-- tier through a CREATE OR REPLACE VIEW. That arrangement leaked tier mixing
+-- at the storage layer (raw, cleaned, and analytics rows shared the same
+-- physical pages, the same indexes, and the same self-referential FK).
+-- It also made it impossible for the database to enforce that a "cleaned"
+-- record's lineage_source actually points at a raw record (and analytics at
+-- cleaned) — the FK was self-referential and the tier column was unchecked.
 --
---   1. Lineage integrity — the self-referential FK (lineage_source_id) naturally
---      links raw -> cleaned -> analytics records within one table, ensuring
---      referential integrity without cross-table foreign keys.
+-- This migration replaces that workaround with three distinct physical
+-- tables and EXPLICIT cross-table foreign keys, so lineage integrity is
+-- enforced by the database itself:
 --
---   2. Simplified queries — append-only audit and tombstone operations apply
---      uniformly regardless of tier.
+--   governance_raw       — bottom tier; no source.
+--   governance_cleaned   — FK lineage_source_id -> governance_raw(id).
+--   governance_analytics — FK lineage_source_id -> governance_cleaned(id).
 --
---   3. Operational simplicity — a single-hospital offline intranet does not
---      require the storage-engine separation that multi-petabyte data lakes need.
---
--- To satisfy the "tiered storage tables" requirement and provide logical
--- separation, the following views expose each tier as a distinct queryable
--- surface with explicit lineage links.
+-- A shared monotonic id sequence (governance_id_sequence) is used so that
+-- record ids remain globally unique across the three tiers, which keeps the
+-- public API surface (`/governance/records/{id}`) and the audit log entity
+-- ids stable and unambiguous.
 
-CREATE OR REPLACE VIEW governance_raw AS
-SELECT
-    id, lineage_source_id, lineage_metadata, payload_json,
-    tombstoned, tombstone_reason, created_by, created_at
-FROM governance_records
-WHERE tier = 'raw';
+-- The legacy single-table workaround and its CREATE OR REPLACE VIEW shims
+-- (governance_records + governance_raw/cleaned/analytics views) are
+-- explicitly torn down before the new physical tables are created. The
+-- DROPs are guarded with IF EXISTS so this migration is also idempotent on
+-- databases that were never bootstrapped with the legacy schema.
+DROP VIEW IF EXISTS governance_analytics;
+DROP VIEW IF EXISTS governance_cleaned;
+DROP VIEW IF EXISTS governance_raw;
+DROP TABLE IF EXISTS governance_records;
 
-CREATE OR REPLACE VIEW governance_cleaned AS
-SELECT
-    gc.id,
-    gc.lineage_source_id,
-    gc.lineage_metadata,
-    gc.payload_json,
-    gc.tombstoned,
-    gc.tombstone_reason,
-    gc.created_by,
-    gc.created_at,
-    gr.payload_json AS raw_source_payload
-FROM governance_records gc
-LEFT JOIN governance_records gr ON gc.lineage_source_id = gr.id AND gr.tier = 'raw'
-WHERE gc.tier = 'cleaned';
+CREATE TABLE IF NOT EXISTS governance_id_sequence (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT
+);
 
-CREATE OR REPLACE VIEW governance_analytics AS
-SELECT
-    ga.id,
-    ga.lineage_source_id,
-    ga.lineage_metadata,
-    ga.payload_json,
-    ga.tombstoned,
-    ga.tombstone_reason,
-    ga.created_by,
-    ga.created_at,
-    gc.payload_json AS cleaned_source_payload,
-    gr.payload_json AS raw_source_payload
-FROM governance_records ga
-LEFT JOIN governance_records gc ON ga.lineage_source_id = gc.id AND gc.tier = 'cleaned'
-LEFT JOIN governance_records gr ON gc.lineage_source_id = gr.id AND gr.tier = 'raw'
-WHERE ga.tier = 'analytics';
+CREATE TABLE IF NOT EXISTS governance_raw (
+    id BIGINT PRIMARY KEY,
+    lineage_metadata TEXT NOT NULL,
+    payload_json LONGTEXT NOT NULL,
+    tombstoned BOOLEAN NOT NULL DEFAULT FALSE,
+    tombstone_reason TEXT NULL,
+    created_by BIGINT NOT NULL,
+    created_at DATETIME NOT NULL,
+    CONSTRAINT fk_gov_raw_user FOREIGN KEY (created_by) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS governance_cleaned (
+    id BIGINT PRIMARY KEY,
+    lineage_source_id BIGINT NOT NULL,
+    lineage_metadata TEXT NOT NULL,
+    payload_json LONGTEXT NOT NULL,
+    tombstoned BOOLEAN NOT NULL DEFAULT FALSE,
+    tombstone_reason TEXT NULL,
+    created_by BIGINT NOT NULL,
+    created_at DATETIME NOT NULL,
+    CONSTRAINT fk_gov_cleaned_source
+        FOREIGN KEY (lineage_source_id) REFERENCES governance_raw(id),
+    CONSTRAINT fk_gov_cleaned_user FOREIGN KEY (created_by) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS governance_analytics (
+    id BIGINT PRIMARY KEY,
+    lineage_source_id BIGINT NOT NULL,
+    lineage_metadata TEXT NOT NULL,
+    payload_json LONGTEXT NOT NULL,
+    tombstoned BOOLEAN NOT NULL DEFAULT FALSE,
+    tombstone_reason TEXT NULL,
+    created_by BIGINT NOT NULL,
+    created_at DATETIME NOT NULL,
+    CONSTRAINT fk_gov_analytics_source
+        FOREIGN KEY (lineage_source_id) REFERENCES governance_cleaned(id),
+    CONSTRAINT fk_gov_analytics_user FOREIGN KEY (created_by) REFERENCES users(id)
+);

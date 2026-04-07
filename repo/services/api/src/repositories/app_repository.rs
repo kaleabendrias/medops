@@ -159,6 +159,11 @@ pub trait AppRepository: Send + Sync {
 
     async fn create_menu(&self, menu_date: &str, meal_period: &str, item_name: &str, calories: i32, actor_id: i64) -> Result<(), ApiError>;
     async fn list_menus(&self) -> Result<Vec<DiningMenuDto>, ApiError>;
+    /// Pre-flight menu governance enforcement for the order creation flow.
+    /// Returns Err(ApiError::BadRequest) if the menu line / linked dish does
+    /// not exist, and Err(ApiError::Forbidden) if the dish is unpublished,
+    /// sold out, or outside its configured sales window.
+    async fn validate_menu_orderable(&self, menu_id: i64) -> Result<(), ApiError>;
     async fn create_order(&self, patient_id: i64, menu_id: i64, notes: &str, actor_id: i64) -> Result<i64, ApiError>;
     async fn create_order_idempotent(
         &self,

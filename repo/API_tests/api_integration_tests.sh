@@ -121,7 +121,7 @@ code=$(api_call "POST" "/auth/login" "" '{"username":"lockout_user","password":"
 assert_code "lockout_enforced_after_failures" "400" "$code"
 
 session_timeout_token=$(login_token "member1" "Admin#OfflinePass123")
-mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 481 MINUTE) WHERE session_token = '$session_timeout_token';"
+mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 481 MINUTE) WHERE session_token_hash = SHA2('$session_timeout_token', 256);"
 code=$(api_call "GET" "/session" "$session_timeout_token")
 assert_code "session_timeout_enforced" "401" "$code"
 
@@ -362,6 +362,14 @@ code=$(api_call "POST" "/cafeteria/dishes" "$admin_token" '{"category_id":1,"nam
 assert_code "campaign_dish_create" "200" "$code"
 campaign_dish_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.json")))')
 
+# Order creation now requires the linked dish to be published, not sold out,
+# and within an active sales window. Publish the dish and seed an all-day
+# sales window so subsequent /orders POSTs against this menu line succeed.
+code=$(api_call "PUT" "/cafeteria/dishes/$campaign_dish_id/status" "$admin_token" '{"is_published":true,"is_sold_out":false}')
+assert_code "campaign_dish_publish" "200" "$code"
+code=$(api_call "POST" "/cafeteria/dishes/$campaign_dish_id/windows" "$admin_token" '{"slot_name":"all-day","start_hhmm":"00:00","end_hhmm":"23:59"}')
+assert_code "campaign_dish_sales_window" "200" "$code"
+
 code=$(api_call "POST" "/dining/menus" "$admin_token" '{"menu_date":"2026-01-01","meal_period":"Lunch","item_name":"Campaign Meal","calories":500}')
 assert_code "campaign_menu_create" "200" "$code"
 campaign_menus_json=$(curl -s -X GET "$API_BASE/dining/menus" -H "X-Session-Token: $admin_token")
@@ -447,6 +455,16 @@ if [ "$export_audit_count" -lt 2 ]; then
   fail_case "patient_export_audit_logged" "expected export audit records for json and csv"
 fi
 pass_case "patient_export_audit_logged" "patient export workflow emits audit records"
+
+# Bring up the underlying dish first so the menu line we create below passes
+# the order-creation governance pre-flight (linked dish + published + window).
+code=$(api_call "POST" "/cafeteria/dishes" "$admin_token" '{"category_id":1,"name":"Test Meal","description":"integration test dish","base_price_cents":900,"photo_path":"/tmp/test.jpg"}')
+assert_code "test_meal_dish_create" "200" "$code"
+test_meal_dish_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.json")))')
+code=$(api_call "PUT" "/cafeteria/dishes/$test_meal_dish_id/status" "$admin_token" '{"is_published":true,"is_sold_out":false}')
+assert_code "test_meal_dish_publish" "200" "$code"
+code=$(api_call "POST" "/cafeteria/dishes/$test_meal_dish_id/windows" "$admin_token" '{"slot_name":"all-day","start_hhmm":"00:00","end_hhmm":"23:59"}')
+assert_code "test_meal_dish_sales_window" "200" "$code"
 
 code=$(api_call "POST" "/dining/menus" "$admin_token" '{"menu_date":"2026-01-01","meal_period":"Lunch","item_name":"Test Meal","calories":500}')
 assert_code "menu_create" "200" "$code"
@@ -1075,7 +1093,7 @@ assert_code "invalid_token_campaigns_rejected" "401" "$code"
 
 # Revoked token (disable user, then try their token)
 revoke_test_token=$(login_token "member1" "Admin#OfflinePass123")
-mysql_query "DELETE FROM sessions WHERE session_token = '$revoke_test_token';"
+mysql_query "DELETE FROM sessions WHERE session_token_hash = SHA2('$revoke_test_token', 256);"
 code=$(api_call "GET" "/orders" "$revoke_test_token")
 assert_code "revoked_token_orders_rejected" "401" "$code"
 # Re-login member for downstream use
@@ -1083,12 +1101,12 @@ member_token=$(login_token "member1" "Admin#OfflinePass123")
 
 # ── Session timeout boundary: exactly 480 minutes ──
 boundary_token=$(login_token "member1" "Admin#OfflinePass123")
-mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 479 MINUTE) WHERE session_token = '$boundary_token';"
+mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 479 MINUTE) WHERE session_token_hash = SHA2('$boundary_token', 256);"
 code=$(api_call "GET" "/session" "$boundary_token")
 assert_code "session_active_at_479_minutes" "200" "$code"
 
 boundary_token_expired=$(login_token "member1" "Admin#OfflinePass123")
-mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 481 MINUTE) WHERE session_token = '$boundary_token_expired';"
+mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 481 MINUTE) WHERE session_token_hash = SHA2('$boundary_token_expired', 256);"
 code=$(api_call "GET" "/session" "$boundary_token_expired")
 assert_code "session_expired_at_481_minutes" "401" "$code"
 

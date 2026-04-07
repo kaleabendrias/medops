@@ -170,18 +170,17 @@ API layers in `services/api/src` are intentionally strict:
 
 ### Governance Tiered Storage
 
-The governance data model uses a **single physical table** (`governance_records`) with a
-`tier` column (`raw`, `cleaned`, `analytics`) and a self-referential `lineage_source_id`
-foreign key for lineage tracking. This is an accepted architectural deviation from
-separate physical tables, chosen for:
+The governance data model is split across **three distinct physical tables** —
+`governance_raw`, `governance_cleaned`, and `governance_analytics` — defined
+in migration `014_governance_tiered_views.sql`. Cross-tier lineage is
+enforced by **explicit foreign keys** between the tables:
 
-1. **Lineage integrity** — cross-tier FK references stay within one table.
-2. **Uniform policy** — append-only audit and tombstone logic apply identically.
-3. **Operational simplicity** — appropriate for a single-hospital offline deployment.
+- `governance_cleaned.lineage_source_id` → `governance_raw(id)`
+- `governance_analytics.lineage_source_id` → `governance_cleaned(id)`
 
-Logical separation is provided via tiered views (`governance_raw`, `governance_cleaned`,
-`governance_analytics`) defined in migration `014_governance_tiered_views.sql`, each
-exposing its tier with explicit lineage joins to source records.
+Record IDs are globally unique across the three tiers; each insert allocates
+its primary key from a shared `governance_id_sequence` table, so the public
+`/governance/records/{id}` surface remains stable and unambiguous.
 
 ## Intranet API Surface
 

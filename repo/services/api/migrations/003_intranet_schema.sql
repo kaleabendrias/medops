@@ -29,9 +29,14 @@ CREATE TABLE IF NOT EXISTS users (
     CONSTRAINT fk_users_role FOREIGN KEY (role_id) REFERENCES roles(id)
 );
 
+-- Session tokens are NEVER stored in plaintext. The application hashes the
+-- generated bearer token with SHA-256 (hex-encoded, 64 chars) before INSERT or
+-- lookup. A database read compromise therefore cannot be used to hijack
+-- existing sessions, since the raw bearer token is unrecoverable from the
+-- stored digest.
 CREATE TABLE IF NOT EXISTS sessions (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    session_token VARCHAR(128) NOT NULL UNIQUE,
+    session_token_hash CHAR(64) NOT NULL UNIQUE,
     user_id BIGINT NOT NULL,
     created_at DATETIME NOT NULL,
     last_activity_at DATETIME NOT NULL,
@@ -160,19 +165,10 @@ CREATE TABLE IF NOT EXISTS dining_orders (
     CONSTRAINT fk_order_user FOREIGN KEY (created_by) REFERENCES users(id)
 );
 
-CREATE TABLE IF NOT EXISTS governance_records (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    tier VARCHAR(32) NOT NULL,
-    lineage_source_id BIGINT NULL,
-    lineage_metadata TEXT NOT NULL,
-    payload_json LONGTEXT NOT NULL,
-    tombstoned BOOLEAN NOT NULL DEFAULT FALSE,
-    tombstone_reason TEXT NULL,
-    created_by BIGINT NOT NULL,
-    created_at DATETIME NOT NULL,
-    CONSTRAINT fk_governance_source FOREIGN KEY (lineage_source_id) REFERENCES governance_records(id),
-    CONSTRAINT fk_governance_user FOREIGN KEY (created_by) REFERENCES users(id)
-);
+-- Governance tiered storage is defined in migration 014 as three distinct
+-- physical tables (governance_raw / governance_cleaned / governance_analytics)
+-- with explicit cross-table foreign keys for lineage. The previous
+-- single-table-with-discriminator schema is intentionally not created here.
 
 CREATE TABLE IF NOT EXISTS experiments (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
