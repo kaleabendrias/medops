@@ -27,7 +27,7 @@ pass_case() {
 }
 
 mysql_query() {
-  docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "$1" 2>/dev/null
+  mysql -h mysql --ssl=0 -N -uapp_user hospital_platform -e "$1" 2>/dev/null
 }
 
 expected_migrations=$(ls -1 services/api/migrations/*.sql 2>/dev/null | wc -l)

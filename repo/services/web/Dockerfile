@@ -34,10 +34,18 @@ RUN trunk build --release --public-url /
 
 FROM nginx:1.27-alpine AS runtime
 
-RUN apk add --no-cache wget
+RUN apk add --no-cache wget openssl
+
+# Generate a self-signed TLS certificate for the HTTPS listener (port 8443).
+# For production deployments replace this with a CA-issued certificate.
+RUN mkdir -p /etc/nginx/ssl && \
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+      -keyout /etc/nginx/ssl/server.key \
+      -out /etc/nginx/ssl/server.crt \
+      -subj "/CN=hospital-platform/O=Hospital/C=US"
 
 COPY services/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /workspace/services/web/dist /usr/share/nginx/html
 
-EXPOSE 8080
+EXPOSE 8080 8443
 CMD ["nginx", "-g", "daemon off;"]

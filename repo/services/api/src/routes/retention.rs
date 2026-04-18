@@ -5,7 +5,7 @@ use crate::contracts::{ApiError, RetentionPolicyDto, RetentionSettingsDto};
 use crate::infrastructure::auth::middleware::CurrentUser;
 use crate::AppState;
 
-#[rocket::get("/api/v1/retention")]
+#[rocket::get("/api/v1/retention/settings")]
 pub async fn retention_settings(
     state: &State<AppState>,
     _user: CurrentUser,

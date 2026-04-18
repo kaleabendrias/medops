@@ -1,0 +1,9 @@
+{
+  "name": "hospital-playwright-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser E2E tests using Playwright — DOM-level verification of the Dioxus WASM frontend",
+  "devDependencies": {
+    "@playwright/test": "1.47.0"
+  }
+}

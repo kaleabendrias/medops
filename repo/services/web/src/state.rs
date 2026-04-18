@@ -4,7 +4,7 @@ use contracts::MenuEntitlementDto;
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_arch = "wasm32")]
-use gloo_storage::{LocalStorage, Storage};
+use gloo_storage::{SessionStorage, Storage};
 
 #[cfg(target_arch = "wasm32")]
 const SESSION_STORAGE_KEY: &str = "hospital_platform_session";
@@ -27,7 +27,7 @@ pub enum Page {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredSession {
     #[serde(default)]
-    pub token: String,
+    pub csrf_token: String,
     pub user_id: i64,
     pub username: String,
     pub role: String,
@@ -41,7 +41,7 @@ pub struct SessionContext {
 
 #[cfg(target_arch = "wasm32")]
 pub fn save_session(session: &StoredSession) {
-    let _ = LocalStorage::set(SESSION_STORAGE_KEY, session);
+    let _ = SessionStorage::set(SESSION_STORAGE_KEY, session);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,7 +49,7 @@ pub fn save_session(_session: &StoredSession) {}
 
 #[cfg(target_arch = "wasm32")]
 pub fn clear_session() {
-    LocalStorage::delete(SESSION_STORAGE_KEY);
+    SessionStorage::delete(SESSION_STORAGE_KEY);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -57,7 +57,7 @@ pub fn clear_session() {}
 
 #[cfg(target_arch = "wasm32")]
 pub fn load_session() -> Option<StoredSession> {
-    LocalStorage::get(SESSION_STORAGE_KEY).ok()
+    SessionStorage::get(SESSION_STORAGE_KEY).ok()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -179,7 +179,7 @@ mod tests {
     fn ctx(keys: &[&str]) -> SessionContext {
         SessionContext {
             stored: StoredSession {
-                token: "runtime_token".to_string(),
+                csrf_token: "runtime_token".to_string(),
                 user_id: 1,
                 username: "tester".to_string(),
                 role: "admin".to_string(),
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn does_not_flag_first_login_as_user_switch() {
         let next = StoredSession {
-            token: "token".to_string(),
+            csrf_token: "token".to_string(),
             user_id: 1,
             username: "tester".to_string(),
             role: "admin".to_string(),
@@ -257,3 +257,7 @@ mod tests {
         assert_eq!(next, Page::Orders);
     }
 }
+
+#[cfg(test)]
+#[path = "state.test.rs"]
+mod state_extended_tests;

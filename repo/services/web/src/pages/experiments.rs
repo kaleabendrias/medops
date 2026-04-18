@@ -34,7 +34,7 @@ pub fn ExperimentsPage(
                 button {
                     onclick: move |_| {
                         let req = ExperimentCreateRequest { experiment_key: experiment_key() };
-                        let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                        let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                         spawn(async move {
                             match api::create_experiment(&token, req).await {
                                 Ok(id) => {
@@ -58,7 +58,7 @@ pub fn ExperimentsPage(
                     onclick: move |_| {
                         if let (Ok(id), Ok(weight)) = (experiment_id().parse::<i64>(), variant_weight().parse::<f64>()) {
                             let req = ExperimentVariantRequest { variant_key: variant_key(), allocation_weight: weight, feature_version: variant_version() };
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::add_experiment_variant(&token, id, req).await {
                                     Ok(_) => status.set("Variant added".to_string()),
@@ -78,7 +78,7 @@ pub fn ExperimentsPage(
                     onclick: move |_| {
                         if let (Ok(id), Ok(uid)) = (experiment_id().parse::<i64>(), assign_user_id().parse::<i64>()) {
                             let req = ExperimentAssignRequest { user_id: uid, mode: assign_mode() };
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::assign_experiment(&token, id, req).await {
                                     Ok(value) => assigned_variant.set(value.unwrap_or_else(|| "none".to_string())),
@@ -97,7 +97,7 @@ pub fn ExperimentsPage(
                     onclick: move |_| {
                         if let Ok(id) = experiment_id().parse::<i64>() {
                             let req = ExperimentBacktrackRequest { from_version: backtrack_from(), to_version: backtrack_to(), reason: backtrack_reason() };
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::backtrack_experiment(&token, id, req).await {
                                     Ok(_) => status.set("Backtrack recorded".to_string()),

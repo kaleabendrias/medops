@@ -4,7 +4,7 @@ set -euo pipefail
 REPORT_DIR="${1:-test_reports}"
 mkdir -p "$REPORT_DIR"
 
-API_BASE="http://localhost:8000/api/v1"
+API_BASE="http://api:8000/api/v1"
 CASE_FILE="$REPORT_DIR/e2e_smoke.ndjson"
 : >"$CASE_FILE"
 
@@ -28,32 +28,44 @@ pass_case() {
 }
 
 mysql_query() {
-  docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "$1" 2>/dev/null
+  mysql -h mysql --ssl=0 -N -uapp_user hospital_platform -e "$1" 2>/dev/null
 }
 
-login_token() {
+login_user() {
   local username="$1"
   local password="$2"
-  local response
-  response=$(curl -s -X POST "$API_BASE/auth/login" \
+  local tmpheaders="/tmp/login_headers_${username}_$$.txt"
+  local tmpbody="/tmp/login_body_${username}_$$.json"
+  curl -s -D "$tmpheaders" -o "$tmpbody" \
+    -X POST "$API_BASE/auth/login" \
     -H "Content-Type: application/json" \
-    -d "{\"username\":\"$username\",\"password\":\"$password\"}")
-  local token
-  token=$(python3 -c 'import json,sys
-payload = {}
-try:
-    payload = json.load(sys.stdin)
-except Exception:
-    pass
-print(payload.get("token", ""))' <<<"$response")
-  printf '%s' "$token"
+    -d "{\"username\":\"$username\",\"password\":\"$password\"}"
+  local cookie_val
+  cookie_val=$(grep -i "^set-cookie:" "$tmpheaders" \
+    | grep "hospital_session" \
+    | sed 's/.*hospital_session=\([^;]*\).*/\1/' \
+    | tr -d '\r' | head -1)
+  local csrf_token
+  csrf_token=$(python3 -c "import json; print(json.load(open('$tmpbody'))['csrf_token'])" 2>/dev/null || echo "")
+  rm -f "$tmpheaders" "$tmpbody"
+  if [ -n "$cookie_val" ] && [ -n "$csrf_token" ]; then
+    echo "${cookie_val}|${csrf_token}"
+  fi
 }
 
 status_for() {
-  local token="$1"
+  local auth="$1"
   local method="$2"
   local path="$3"
-  curl -s -o /tmp/e2e_smoke_body.json -w "%{http_code}" -X "$method" "$API_BASE$path" -H "X-Session-Token: $token"
+  local cookie_val="${auth%%|*}"
+  local csrf_token="${auth##*|}"
+  local csrf_args=()
+  case "$method" in
+    POST|PUT|DELETE|PATCH)
+      [ -n "$csrf_token" ] && csrf_args=(-H "X-CSRF-Token: ${csrf_token}") ;;
+  esac
+  curl -s -o /tmp/e2e_smoke_body.json -w "%{http_code}" -X "$method" "$API_BASE$path" \
+    --cookie "hospital_session=${cookie_val}" "${csrf_args[@]}"
 }
 
 assert_status() {
@@ -68,10 +80,10 @@ assert_status() {
 
 mysql_query "UPDATE users SET is_disabled = 0 WHERE username IN ('admin','employee1','member1','clinical1','cafeteria1');"
 
-admin_token=$(login_token "admin" "Admin#OfflinePass123")
-clinical_token=$(login_token "clinical1" "Admin#OfflinePass123")
-cafeteria_token=$(login_token "cafeteria1" "Admin#OfflinePass123")
-member_token=$(login_token "member1" "Admin#OfflinePass123")
+admin_token=$(login_user "admin" "Admin#OfflinePass123")
+clinical_token=$(login_user "clinical1" "Admin#OfflinePass123")
+cafeteria_token=$(login_user "cafeteria1" "Admin#OfflinePass123")
+member_token=$(login_user "member1" "Admin#OfflinePass123")
 
 [ -n "$admin_token" ] || fail_case "login_admin" "login failed; token missing"
 [ -n "$clinical_token" ] || fail_case "login_clinical1" "login failed; token missing"
@@ -87,7 +99,7 @@ assert_status "admin_journey_ingestion" "200" "$code"
 
 code=$(status_for "$clinical_token" "GET" "/patients/search?q=john")
 assert_status "clinical_journey_patients" "200" "$code"
-code=$(curl -s -o /tmp/e2e_smoke_body.json -w "%{http_code}" -X POST "$API_BASE/cafeteria/dishes" -H "X-Session-Token: $clinical_token" -H "Content-Type: application/json" -d '{"category_id":1,"name":"forbidden","description":"forbidden","base_price_cents":100,"photo_path":"/tmp/a.jpg"}')
+code=$(curl -s -o /tmp/e2e_smoke_body.json -w "%{http_code}" -X POST "$API_BASE/cafeteria/dishes" --cookie "hospital_session=${clinical_token%%|*}" -H "X-CSRF-Token: ${clinical_token##*|}" -H "Content-Type: application/json" -d '{"category_id":1,"name":"forbidden","description":"forbidden","base_price_cents":100,"photo_path":"/tmp/a.jpg"}')
 assert_status "clinical_journey_dining_management_denied" "403" "$code"
 patient_id=$(mysql_query "SELECT id FROM patients ORDER BY id DESC LIMIT 1;")
 if [ -n "$patient_id" ]; then

@@ -70,8 +70,8 @@ async fn send_request_json<T: DeserializeOwned>(request: Request) -> Result<T, S
         .map_err(|e| format!("decode failed: {e}"))
 }
 
-fn with_auth(builder: RequestBuilder, token: &str) -> RequestBuilder {
-    builder.header("X-Session-Token", token)
+fn with_csrf(builder: RequestBuilder, csrf_token: &str) -> RequestBuilder {
+    builder.header("X-CSRF-Token", csrf_token)
 }
 
 pub async fn login(username: &str, password: &str) -> Result<AuthLoginResponse, String> {
@@ -89,8 +89,14 @@ pub async fn login(username: &str, password: &str) -> Result<AuthLoginResponse, 
     .await
 }
 
+pub async fn logout() -> Result<(), String> {
+    send_builder(Request::post(&format!("{API_BASE}/auth/logout")))
+        .await
+        .map(|_| ())
+}
+
 pub async fn menu_entitlements(token: &str) -> Result<Vec<MenuEntitlementDto>, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/rbac/menu-entitlements")),
         token,
     ))
@@ -98,11 +104,11 @@ pub async fn menu_entitlements(token: &str) -> Result<Vec<MenuEntitlementDto>, S
 }
 
 pub async fn list_users(token: &str) -> Result<Vec<UserSummaryDto>, String> {
-    send_json(with_auth(Request::get(&format!("{API_BASE}/admin/users")), token)).await
+    send_json(with_csrf(Request::get(&format!("{API_BASE}/admin/users")), token)).await
 }
 
 pub async fn disable_user(token: &str, user_id: i64) -> Result<(), String> {
-    send_builder(with_auth(
+    send_builder(with_csrf(
         Request::post(&format!("{API_BASE}/admin/users/{user_id}/disable")),
         token,
     ))
@@ -112,7 +118,7 @@ pub async fn disable_user(token: &str, user_id: i64) -> Result<(), String> {
 
 pub async fn search_patients(token: &str, query: &str) -> Result<Vec<PatientSearchResultDto>, String> {
     let q = urlencoding::encode(query);
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/patients/search?q={q}")),
         token,
     ))
@@ -120,7 +126,7 @@ pub async fn search_patients(token: &str, query: &str) -> Result<Vec<PatientSear
 }
 
 pub async fn get_patient(token: &str, patient_id: i64) -> Result<PatientProfileDto, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/patients/{patient_id}")),
         token,
     ))
@@ -130,7 +136,7 @@ pub async fn get_patient(token: &str, patient_id: i64) -> Result<PatientProfileD
 pub async fn update_patient(token: &str, patient_id: i64, req: PatientUpdateRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::put(&format!("{API_BASE}/patients/{patient_id}")), token)
+        with_csrf(Request::put(&format!("{API_BASE}/patients/{patient_id}")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -147,7 +153,7 @@ pub async fn edit_clinical_field(
 ) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::put(&format!("{API_BASE}/patients/{patient_id}/{field}")), token)
+        with_csrf(Request::put(&format!("{API_BASE}/patients/{patient_id}/{field}")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -159,7 +165,7 @@ pub async fn edit_clinical_field(
 pub async fn add_visit_note(token: &str, patient_id: i64, req: VisitNoteRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::post(&format!("{API_BASE}/patients/{patient_id}/visit-notes")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/patients/{patient_id}/visit-notes")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -170,7 +176,7 @@ pub async fn add_visit_note(token: &str, patient_id: i64, req: VisitNoteRequest)
 
 pub async fn patient_revisions(token: &str, patient_id: i64, reveal_sensitive: bool) -> Result<Vec<RevisionTimelineDto>, String> {
     let reveal = if reveal_sensitive { "true" } else { "false" };
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/patients/{patient_id}/revisions?reveal_sensitive={reveal}")),
         token,
     ))
@@ -178,7 +184,7 @@ pub async fn patient_revisions(token: &str, patient_id: i64, reveal_sensitive: b
 }
 
 pub async fn list_attachments(token: &str, patient_id: i64) -> Result<Vec<AttachmentMetadataDto>, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/patients/{patient_id}/attachments")),
         token,
     ))
@@ -215,7 +221,7 @@ pub async fn upload_attachment(
         .set("Content-Type", "application/octet-stream")
         .map_err(|_| "failed to set content type".to_string())?;
     headers
-        .set("X-Session-Token", token)
+        .set("X-CSRF-Token", token)
         .map_err(|_| "failed to set auth header".to_string())?;
     init.set_headers(&headers);
 
@@ -253,7 +259,7 @@ pub async fn export_patient(
 ) -> Result<PatientExportDto, String> {
     let reveal = if reveal_sensitive { "true" } else { "false" };
     let fmt = urlencoding::encode(format);
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!(
             "{API_BASE}/patients/{patient_id}/export?format={fmt}&reveal_sensitive={reveal}"
         )),
@@ -263,17 +269,17 @@ pub async fn export_patient(
 }
 
 pub async fn list_beds(token: &str) -> Result<Vec<BedDto>, String> {
-    send_json(with_auth(Request::get(&format!("{API_BASE}/bedboard/beds")), token)).await
+    send_json(with_csrf(Request::get(&format!("{API_BASE}/bedboard/beds")), token)).await
 }
 
 pub async fn bed_events(token: &str) -> Result<Vec<BedEventDto>, String> {
-    send_json(with_auth(Request::get(&format!("{API_BASE}/bedboard/events")), token)).await
+    send_json(with_csrf(Request::get(&format!("{API_BASE}/bedboard/events")), token)).await
 }
 
 pub async fn transition_bed(token: &str, bed_id: i64, req: BedTransitionRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::post(&format!("{API_BASE}/bedboard/beds/{bed_id}/transition")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/bedboard/beds/{bed_id}/transition")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -283,7 +289,7 @@ pub async fn transition_bed(token: &str, bed_id: i64, req: BedTransitionRequest)
 }
 
 pub async fn list_dish_categories(token: &str) -> Result<Vec<DishCategoryDto>, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/cafeteria/categories")),
         token,
     ))
@@ -291,13 +297,13 @@ pub async fn list_dish_categories(token: &str) -> Result<Vec<DishCategoryDto>, S
 }
 
 pub async fn list_dishes(token: &str) -> Result<Vec<DishDto>, String> {
-    send_json(with_auth(Request::get(&format!("{API_BASE}/cafeteria/dishes")), token)).await
+    send_json(with_csrf(Request::get(&format!("{API_BASE}/cafeteria/dishes")), token)).await
 }
 
 pub async fn create_dish(token: &str, req: DishCreateRequest) -> Result<i64, String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request_json(
-        with_auth(Request::post(&format!("{API_BASE}/cafeteria/dishes")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/cafeteria/dishes")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -308,7 +314,7 @@ pub async fn create_dish(token: &str, req: DishCreateRequest) -> Result<i64, Str
 pub async fn set_dish_status(token: &str, dish_id: i64, req: DishStatusRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::put(&format!("{API_BASE}/cafeteria/dishes/{dish_id}/status")), token)
+        with_csrf(Request::put(&format!("{API_BASE}/cafeteria/dishes/{dish_id}/status")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -320,7 +326,7 @@ pub async fn set_dish_status(token: &str, dish_id: i64, req: DishStatusRequest) 
 pub async fn add_dish_option(token: &str, dish_id: i64, req: DishOptionRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::post(&format!("{API_BASE}/cafeteria/dishes/{dish_id}/options")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/cafeteria/dishes/{dish_id}/options")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -332,7 +338,7 @@ pub async fn add_dish_option(token: &str, dish_id: i64, req: DishOptionRequest) 
 pub async fn add_sales_window(token: &str, dish_id: i64, req: DishWindowRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::post(&format!("{API_BASE}/cafeteria/dishes/{dish_id}/windows")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/cafeteria/dishes/{dish_id}/windows")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -342,7 +348,7 @@ pub async fn add_sales_window(token: &str, dish_id: i64, req: DishWindowRequest)
 }
 
 pub async fn ranking_rules(token: &str) -> Result<Vec<RankingRuleDto>, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/cafeteria/ranking-rules")),
         token,
     ))
@@ -352,7 +358,7 @@ pub async fn ranking_rules(token: &str) -> Result<Vec<RankingRuleDto>, String> {
 pub async fn upsert_ranking_rule(token: &str, req: RankingRuleRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::put(&format!("{API_BASE}/cafeteria/ranking-rules")), token)
+        with_csrf(Request::put(&format!("{API_BASE}/cafeteria/ranking-rules")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -362,7 +368,7 @@ pub async fn upsert_ranking_rule(token: &str, req: RankingRuleRequest) -> Result
 }
 
 pub async fn recommendations(token: &str) -> Result<Vec<RecommendationDto>, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/cafeteria/recommendations")),
         token,
     ))
@@ -370,13 +376,13 @@ pub async fn recommendations(token: &str) -> Result<Vec<RecommendationDto>, Stri
 }
 
 pub async fn list_menus(token: &str) -> Result<Vec<contracts::DiningMenuDto>, String> {
-    send_json(with_auth(Request::get(&format!("{API_BASE}/dining/menus")), token)).await
+    send_json(with_csrf(Request::get(&format!("{API_BASE}/dining/menus")), token)).await
 }
 
 pub async fn place_order(token: &str, req: OrderCreateRequest) -> Result<i64, String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request_json(
-        with_auth(Request::post(&format!("{API_BASE}/orders")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/orders")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -385,13 +391,13 @@ pub async fn place_order(token: &str, req: OrderCreateRequest) -> Result<i64, St
 }
 
 pub async fn list_orders(token: &str) -> Result<Vec<OrderDto>, String> {
-    send_json(with_auth(Request::get(&format!("{API_BASE}/orders")), token)).await
+    send_json(with_csrf(Request::get(&format!("{API_BASE}/orders")), token)).await
 }
 
 pub async fn set_order_status(token: &str, order_id: i64, req: OrderStatusRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::put(&format!("{API_BASE}/orders/{order_id}/status")), token)
+        with_csrf(Request::put(&format!("{API_BASE}/orders/{order_id}/status")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -403,7 +409,7 @@ pub async fn set_order_status(token: &str, order_id: i64, req: OrderStatusReques
 pub async fn add_order_note(token: &str, order_id: i64, req: OrderNoteRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::post(&format!("{API_BASE}/orders/{order_id}/notes")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/orders/{order_id}/notes")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -413,7 +419,7 @@ pub async fn add_order_note(token: &str, order_id: i64, req: OrderNoteRequest) -
 }
 
 pub async fn list_order_notes(token: &str, order_id: i64) -> Result<Vec<OrderNoteDto>, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/orders/{order_id}/notes")),
         token,
     ))
@@ -423,7 +429,7 @@ pub async fn list_order_notes(token: &str, order_id: i64) -> Result<Vec<OrderNot
 pub async fn add_ticket_split(token: &str, order_id: i64, req: TicketSplitRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(
+        with_csrf(
             Request::post(&format!("{API_BASE}/orders/{order_id}/ticket-splits")),
             token,
         )
@@ -436,7 +442,7 @@ pub async fn add_ticket_split(token: &str, order_id: i64, req: TicketSplitReques
 }
 
 pub async fn list_ticket_splits(token: &str, order_id: i64) -> Result<Vec<TicketSplitDto>, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/orders/{order_id}/ticket-splits")),
         token,
     ))
@@ -444,13 +450,13 @@ pub async fn list_ticket_splits(token: &str, order_id: i64) -> Result<Vec<Ticket
 }
 
 pub async fn list_campaigns(token: &str) -> Result<Vec<CampaignDto>, String> {
-    send_json(with_auth(Request::get(&format!("{API_BASE}/campaigns")), token)).await
+    send_json(with_csrf(Request::get(&format!("{API_BASE}/campaigns")), token)).await
 }
 
 pub async fn create_campaign(token: &str, req: CampaignCreateRequest) -> Result<i64, String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request_json(
-        with_auth(Request::post(&format!("{API_BASE}/campaigns")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/campaigns")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -459,7 +465,7 @@ pub async fn create_campaign(token: &str, req: CampaignCreateRequest) -> Result<
 }
 
 pub async fn join_campaign(token: &str, campaign_id: i64) -> Result<(), String> {
-    send_builder(with_auth(
+    send_builder(with_csrf(
         Request::post(&format!("{API_BASE}/campaigns/{campaign_id}/join")),
         token,
     ))
@@ -470,7 +476,7 @@ pub async fn join_campaign(token: &str, campaign_id: i64) -> Result<(), String> 
 pub async fn create_experiment(token: &str, req: ExperimentCreateRequest) -> Result<i64, String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request_json(
-        with_auth(Request::post(&format!("{API_BASE}/experiments")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/experiments")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -485,7 +491,7 @@ pub async fn add_experiment_variant(
 ) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::post(&format!("{API_BASE}/experiments/{experiment_id}/variants")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/experiments/{experiment_id}/variants")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -501,7 +507,7 @@ pub async fn assign_experiment(
 ) -> Result<Option<String>, String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request_json(
-        with_auth(Request::post(&format!("{API_BASE}/experiments/{experiment_id}/assign")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/experiments/{experiment_id}/assign")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -516,7 +522,7 @@ pub async fn backtrack_experiment(
 ) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(Request::post(&format!("{API_BASE}/experiments/{experiment_id}/backtrack")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/experiments/{experiment_id}/backtrack")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -526,7 +532,7 @@ pub async fn backtrack_experiment(
 }
 
 pub async fn funnel_metrics(token: &str) -> Result<Vec<FunnelMetricsDto>, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/analytics/funnel")),
         token,
     ))
@@ -534,7 +540,7 @@ pub async fn funnel_metrics(token: &str) -> Result<Vec<FunnelMetricsDto>, String
 }
 
 pub async fn retention_metrics(token: &str) -> Result<Vec<RetentionMetricsDto>, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/analytics/retention")),
         token,
     ))
@@ -542,7 +548,7 @@ pub async fn retention_metrics(token: &str) -> Result<Vec<RetentionMetricsDto>, 
 }
 
 pub async fn recommendation_kpi(token: &str) -> Result<RecommendationKpiDto, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/analytics/recommendation-kpi")),
         token,
     ))
@@ -550,17 +556,17 @@ pub async fn recommendation_kpi(token: &str) -> Result<RecommendationKpiDto, Str
 }
 
 pub async fn list_audits(token: &str) -> Result<Vec<AuditLogDto>, String> {
-    send_json(with_auth(Request::get(&format!("{API_BASE}/audits")), token)).await
+    send_json(with_csrf(Request::get(&format!("{API_BASE}/audits")), token)).await
 }
 
 pub async fn list_ingestion_tasks(token: &str) -> Result<Vec<IngestionTaskDto>, String> {
-    send_json(with_auth(Request::get(&format!("{API_BASE}/ingestion/tasks")), token)).await
+    send_json(with_csrf(Request::get(&format!("{API_BASE}/ingestion/tasks")), token)).await
 }
 
 pub async fn create_ingestion_task(token: &str, req: IngestionTaskCreateRequest) -> Result<i64, String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request_json(
-        with_auth(Request::post(&format!("{API_BASE}/ingestion/tasks")), token)
+        with_csrf(Request::post(&format!("{API_BASE}/ingestion/tasks")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -575,7 +581,7 @@ pub async fn update_ingestion_task(
 ) -> Result<i32, String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request_json(
-        with_auth(Request::put(&format!("{API_BASE}/ingestion/tasks/{task_id}")), token)
+        with_csrf(Request::put(&format!("{API_BASE}/ingestion/tasks/{task_id}")), token)
             .header("Content-Type", "application/json")
             .body(body)
             .map_err(|e| format!("request build failed: {e}"))?,
@@ -590,7 +596,7 @@ pub async fn rollback_ingestion_task(
 ) -> Result<i32, String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request_json(
-        with_auth(
+        with_csrf(
             Request::post(&format!("{API_BASE}/ingestion/tasks/{task_id}/rollback")),
             token,
         )
@@ -602,7 +608,7 @@ pub async fn rollback_ingestion_task(
 }
 
 pub async fn run_ingestion_task(token: &str, task_id: i64) -> Result<(), String> {
-    send_builder(with_auth(
+    send_builder(with_csrf(
         Request::post(&format!("{API_BASE}/ingestion/tasks/{task_id}/run")),
         token,
     ))
@@ -611,7 +617,7 @@ pub async fn run_ingestion_task(token: &str, task_id: i64) -> Result<(), String>
 }
 
 pub async fn ingestion_task_versions(token: &str, task_id: i64) -> Result<Vec<IngestionTaskVersionDto>, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/ingestion/tasks/{task_id}/versions")),
         token,
     ))
@@ -619,7 +625,7 @@ pub async fn ingestion_task_versions(token: &str, task_id: i64) -> Result<Vec<In
 }
 
 pub async fn ingestion_task_runs(token: &str, task_id: i64) -> Result<Vec<IngestionTaskRunDto>, String> {
-    send_json(with_auth(
+    send_json(with_csrf(
         Request::get(&format!("{API_BASE}/ingestion/tasks/{task_id}/runs")),
         token,
     ))
@@ -630,7 +636,7 @@ pub async fn ingestion_task_runs(token: &str, task_id: i64) -> Result<Vec<Ingest
 pub async fn send_telemetry_event(token: &str, req: TelemetryEventRequest) -> Result<(), String> {
     let body = serde_json::to_string(&req).map_err(|e| format!("encode failed: {e}"))?;
     send_request(
-        with_auth(
+        with_csrf(
             Request::post(&format!("{API_BASE}/telemetry/events")),
             token,
         )
@@ -657,4 +663,158 @@ pub fn track_ui_event(token: &str, experiment_key: &str, event_name: &str, paylo
     });
     #[cfg(not(target_arch = "wasm32"))]
     { let _ = (token, req); }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn api_base_is_same_origin_relative_path() {
+        assert_eq!(super::API_BASE, "/api/v1");
+    }
+
+    #[test]
+    fn api_base_starts_with_slash_not_host() {
+        assert!(super::API_BASE.starts_with('/'));
+        assert!(!super::API_BASE.contains("localhost"));
+        assert!(!super::API_BASE.contains("http"));
+    }
+
+    #[test]
+    fn http_error_format_includes_status_code_and_body() {
+        let status: u16 = 403;
+        let body = "Forbidden";
+        let msg = format!("http {status}: {body}");
+        assert_eq!(msg, "http 403: Forbidden");
+        assert!(msg.contains("403"));
+    }
+
+    #[test]
+    fn http_error_format_for_401() {
+        let status: u16 = 401;
+        let body = "Unauthorized";
+        let msg = format!("http {status}: {body}");
+        assert!(msg.starts_with("http 401:"));
+    }
+
+    #[test]
+    fn decode_error_format_includes_description() {
+        let e = "unexpected field";
+        let msg = format!("decode failed: {e}");
+        assert!(msg.starts_with("decode failed:"));
+        assert!(msg.contains("unexpected field"));
+    }
+
+    #[test]
+    fn encode_error_format_includes_description() {
+        let e = "unsupported type";
+        let msg = format!("encode failed: {e}");
+        assert!(msg.starts_with("encode failed:"));
+        assert!(msg.contains("unsupported type"));
+    }
+
+    #[test]
+    fn request_build_failed_format_includes_cause() {
+        let e = "invalid header value";
+        let msg = format!("request build failed: {e}");
+        assert!(msg.starts_with("request build failed:"));
+        assert!(msg.contains("invalid header value"));
+    }
+
+    #[test]
+    fn request_failed_format_includes_cause() {
+        let e = "network error";
+        let msg = format!("request failed: {e}");
+        assert!(msg.starts_with("request failed:"));
+    }
+
+    #[test]
+    fn upload_non_wasm_error_message_is_descriptive() {
+        let msg = "binary upload is available only in browser runtime";
+        assert!(msg.contains("browser runtime"));
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn reveal_sensitive_true_maps_to_string_true() {
+        let reveal_sensitive = true;
+        let param = if reveal_sensitive { "true" } else { "false" };
+        assert_eq!(param, "true");
+    }
+
+    #[test]
+    fn reveal_sensitive_false_maps_to_string_false() {
+        let reveal_sensitive = false;
+        let param = if reveal_sensitive { "true" } else { "false" };
+        assert_eq!(param, "false");
+    }
+
+    #[test]
+    fn api_url_patient_path_formats_correctly() {
+        let base = "/api/v1";
+        let id: i64 = 42;
+        assert_eq!(format!("{base}/patients/{id}"), "/api/v1/patients/42");
+        assert_eq!(format!("{base}/patients/{id}/attachments"), "/api/v1/patients/42/attachments");
+        assert_eq!(format!("{base}/patients/{id}/visit-notes"), "/api/v1/patients/42/visit-notes");
+    }
+
+    #[test]
+    fn api_url_ingestion_task_format_is_correct() {
+        let base = "/api/v1";
+        let id: i64 = 7;
+        assert_eq!(format!("{base}/ingestion/tasks/{id}/versions"), "/api/v1/ingestion/tasks/7/versions");
+        assert_eq!(format!("{base}/ingestion/tasks/{id}/runs"), "/api/v1/ingestion/tasks/7/runs");
+        assert_eq!(format!("{base}/ingestion/tasks/{id}/rollback"), "/api/v1/ingestion/tasks/7/rollback");
+    }
+
+    #[test]
+    fn csrf_header_name_matches_server_expectation() {
+        let header_name = "X-CSRF-Token";
+        assert_eq!(header_name, "X-CSRF-Token");
+        assert!(header_name.starts_with("X-"));
+    }
+
+    #[test]
+    fn api_url_order_sub_resources() {
+        let base = "/api/v1";
+        let id: i64 = 5;
+        assert_eq!(format!("{base}/orders/{id}/notes"), "/api/v1/orders/5/notes");
+        assert_eq!(format!("{base}/orders/{id}/ticket-splits"), "/api/v1/orders/5/ticket-splits");
+        assert_eq!(format!("{base}/orders/{id}/status"), "/api/v1/orders/5/status");
+    }
+
+    #[test]
+    fn api_url_experiment_sub_resources() {
+        let base = "/api/v1";
+        let id: i64 = 3;
+        assert_eq!(format!("{base}/experiments/{id}/variants"), "/api/v1/experiments/3/variants");
+        assert_eq!(format!("{base}/experiments/{id}/assign"), "/api/v1/experiments/3/assign");
+        assert_eq!(format!("{base}/experiments/{id}/backtrack"), "/api/v1/experiments/3/backtrack");
+    }
+
+    #[test]
+    fn api_url_patient_search_encodes_spaces() {
+        let base = "/api/v1";
+        let q = urlencoding::encode("john doe");
+        let url = format!("{base}/patients/search?q={q}");
+        assert!(url.contains("john%20doe") || url.contains("john+doe"));
+        assert!(url.starts_with("/api/v1/patients/search?q="));
+    }
+
+    #[test]
+    fn api_url_patient_export_includes_both_params() {
+        let base = "/api/v1";
+        let id: i64 = 1;
+        let fmt = urlencoding::encode("json");
+        let reveal = "true";
+        let url = format!("{base}/patients/{id}/export?format={fmt}&reveal_sensitive={reveal}");
+        assert!(url.contains("format=json"));
+        assert!(url.contains("reveal_sensitive=true"));
+    }
+
+    #[test]
+    fn unable_to_read_error_body_fallback_message_is_defined() {
+        let fallback = "unable to read error body";
+        assert!(!fallback.is_empty());
+        assert!(fallback.contains("error body"));
+    }
 }

@@ -23,7 +23,7 @@ pub fn CampaignsPage(
             button {
                 class: "primary",
                 onclick: move |_| {
-                    let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                    let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                     spawn(async move {
                         match api::list_campaigns(&token).await {
                             Ok(items) => campaigns.set(items),
@@ -48,7 +48,7 @@ pub fn CampaignsPage(
                                 success_threshold,
                                 success_deadline_at: campaign_deadline(),
                             };
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::create_campaign(&token, req).await {
                                     Ok(id) => status.set(format!("Campaign created #{id}")),
@@ -66,7 +66,7 @@ pub fn CampaignsPage(
                 button {
                     onclick: move |_| {
                         if let Ok(id) = campaign_join_id().parse::<i64>() {
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::join_campaign(&token, id).await {
                                     Ok(_) => {

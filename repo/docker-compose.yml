@@ -34,8 +34,6 @@ services:
       dockerfile: services/api/Dockerfile
     container_name: monorepo_api
     restart: unless-stopped
-    ports:
-      - "8000:8000"
     depends_on:
       mysql:
         condition: service_healthy
@@ -55,7 +53,7 @@ services:
     container_name: monorepo_web
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8443:8443"
     depends_on:
       api:
         condition: service_healthy
@@ -75,6 +73,76 @@ services:
       CARGO_NET_RETRY: "10"
     volumes:
       - .:/workspace
+
+  playwright_tests:
+    build:
+      context: .
+      dockerfile: API_tests/Dockerfile.playwright
+    container_name: monorepo_playwright_tests
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    profiles:
+      - testing
+
+  integration_tests:
+    build:
+      context: .
+      dockerfile: API_tests/Dockerfile.test_runner
+    container_name: monorepo_integration_tests
+    working_dir: /workspace
+    environment:
+      MYSQL_PWD: ${MYSQL_PASSWORD:-app_password_local}
+    volumes:
+      - .:/workspace
+    depends_on:
+      api:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    profiles:
+      - testing
+
+  test_db:
+    image: mysql:8.4
+    container_name: monorepo_test_db
+    command: --log-bin-trust-function-creators=1
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password_local}
+      MYSQL_DATABASE: hospital_test
+      MYSQL_USER: ${MYSQL_USER:-app_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app_password_local}
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p${MYSQL_ROOT_PASSWORD:-root_password_local} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    profiles:
+      - testing
+
+  db_test_runner:
+    image: rust:bookworm
+    container_name: monorepo_db_test_runner
+    working_dir: /workspace
+    environment:
+      DATABASE_TEST_URL: mysql://app_user:app_password_local@test_db:3306/hospital_test
+      CARGO_HTTP_TIMEOUT: "120"
+      CARGO_NET_RETRY: "10"
+    volumes:
+      - .:/workspace
+    depends_on:
+      test_db:
+        condition: service_healthy
+    profiles:
+      - testing
 
 volumes:
   mysql_data:

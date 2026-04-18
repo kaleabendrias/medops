@@ -7,8 +7,8 @@ Base namespace:
 - /api/v1
 
 Primary runtime endpoint defaults:
-- API host: http://localhost:8000
-- Web host: http://localhost:8080
+- API host: http://localhost:8000 (internal; not exposed to end-users)
+- Web host: https://localhost:8443
 
 ## 2. Authentication and Session
 
@@ -19,17 +19,26 @@ Primary runtime endpoint defaults:
 	- username: string
 	- password: string
 - Success response: AuthLoginResponse
-	- token: string
+	- csrf_token: string — derived as hex(SHA256(bearer_token + ":csrf-v1")); must be sent as X-CSRF-Token on mutating requests
 	- user_id: integer
 	- username: string
 	- role: string
 	- expires_in_minutes: integer
+- Side effect: sets an HttpOnly, Secure cookie named `hospital_session` containing the session bearer token. The browser sends this cookie automatically on subsequent same-origin requests.
 
-### 2.2 Authenticated Requests
-- Header: X-Session-Token: <token>
-- Required for all protected endpoints except:
+### 2.2 Logout
+- Method: POST
+- Path: /api/v1/auth/logout
+- Requires: `hospital_session` cookie and `X-CSRF-Token` header
+- Revokes the active session server-side and clears the cookie.
+
+### 2.3 Authenticated Requests
+- Session credential: HttpOnly cookie `hospital_session` set at login — sent automatically by the browser; no Authorization header is used.
+- CSRF protection: POST, PUT, DELETE, and PATCH requests must include the header `X-CSRF-Token: <csrf_token>` where `csrf_token` was returned by the login response. GET, HEAD, and OPTIONS requests are exempt.
+- All protected endpoints require a valid `hospital_session` cookie except:
 	- GET /api/v1/health
 	- POST /api/v1/auth/login
+	- POST /api/v1/auth/logout
 
 ## 3. Global Behavior
 
@@ -142,7 +151,7 @@ Typical status classes used across endpoints:
 ## 4.10 Retention and Session Settings
 - GET /api/v1/retention/settings
 - GET /api/v1/retention/policies
-- PUT /api/v1/retention/policies/{policy_key}
+- PUT /api/v1/retention/policies/{policy_key}/{years}
 - GET /api/v1/session
 
 ## 5. Representative Request and Response Contracts

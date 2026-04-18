@@ -58,7 +58,7 @@ pub fn BedboardPage(
                                     patient_id: patient,
                                     note: bed_transition_note(),
                                 };
-                                let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                                let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                                 spawn(async move {
                                     match api::transition_bed(&token, bed_id, req).await {
                                         Ok(_) => status.set("Bed transitioned".to_string()),

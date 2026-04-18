@@ -104,7 +104,7 @@ fn App() -> Element {
 
     use_future(move || async move {
         if let Some(stored) = load_session() {
-            match api::menu_entitlements(&stored.token).await {
+            match api::menu_entitlements(&stored.csrf_token).await {
                 Ok(list) => {
                     let next_session = session_from_entitlements(stored, list);
                     let requested = current_hash_page().unwrap_or(Page::Dashboard);
@@ -127,10 +127,10 @@ fn App() -> Element {
         loop {
             if let Some(ctx) = session() {
                 if can_access(&ctx, Page::Bedboard) {
-                    if let Ok(next_beds) = api::list_beds(&ctx.stored.token).await {
+                    if let Ok(next_beds) = api::list_beds(&ctx.stored.csrf_token).await {
                         beds.set(next_beds);
                     }
-                    if let Ok(next_events) = api::bed_events(&ctx.stored.token).await {
+                    if let Ok(next_events) = api::bed_events(&ctx.stored.csrf_token).await {
                         bed_events.set(next_events);
                     }
                 }
@@ -154,10 +154,10 @@ fn App() -> Element {
                         status.set("Authenticating...".to_string());
                         match api::login(&login_username(), &login_password()).await {
                             Ok(auth) => {
-                                match api::menu_entitlements(&auth.token).await {
+                                match api::menu_entitlements(&auth.csrf_token).await {
                                     Ok(list) => {
                                         let stored = StoredSession {
-                                            token: auth.token,
+                                            csrf_token: auth.csrf_token,
                                             user_id: auth.user_id,
                                             username: auth.username,
                                             role: auth.role,
@@ -174,7 +174,7 @@ fn App() -> Element {
                                         let guarded = ensure_accessible_page(&next_session, requested);
                                         set_hash_page(guarded);
                                         api::track_ui_event(
-                                            &next_session.stored.token,
+                                            &next_session.stored.csrf_token,
                                             "ui_instrumentation",
                                             "session.login",
                                             &format!("{{\"role\":\"{}\"}}", next_session.stored.role),
@@ -231,6 +231,9 @@ fn App() -> Element {
                 set_hash_page(next_page);
             },
             on_sign_out: move |_| {
+                spawn(async move {
+                    let _ = api::logout().await;
+                });
                 clear_session();
                 session.set(None);
                 set_hash_page(Page::Dashboard);

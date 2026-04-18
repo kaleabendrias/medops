@@ -39,7 +39,7 @@ pub fn OrdersPage(
             button {
                 class: "primary",
                 onclick: move |_| {
-                    let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                    let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                     spawn(async move {
                         if let Ok(items) = api::list_menus(&token).await { menus.set(items); }
                         if let Ok(items) = api::list_orders(&token).await { orders.set(items); }
@@ -49,7 +49,18 @@ pub fn OrdersPage(
             }
             section { class: "subpanel",
                 h4 { "Place Order" }
-                input { placeholder: "Patient ID", value: "{order_patient_id}", oninput: move |evt| order_patient_id.set(evt.value()) }
+                if session().as_ref().map(|s| s.stored.role == "member").unwrap_or(false) {
+                    select {
+                        value: "{order_patient_id}",
+                        onchange: move |evt| order_patient_id.set(evt.value()),
+                        for order in orders() {
+                            option { value: "{order.patient_id}", "Patient #{order.patient_id}" }
+                        }
+                    }
+                    p { class: "muted", "Refresh orders to update the patient list." }
+                } else {
+                    input { placeholder: "Patient ID", value: "{order_patient_id}", oninput: move |evt| order_patient_id.set(evt.value()) }
+                }
                 input { placeholder: "Menu ID", value: "{order_menu_id}", oninput: move |evt| order_menu_id.set(evt.value()) }
                 textarea { placeholder: "Notes", value: "{order_notes}", oninput: move |evt| order_notes.set(evt.value()) }
                 button {
@@ -61,7 +72,7 @@ pub fn OrdersPage(
                                 notes: order_notes(),
                                 idempotency_key: None,
                             };
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::place_order(&token, req).await {
                                     Ok(id) => {
@@ -109,7 +120,7 @@ pub fn OrdersPage(
                                 return;
                             }
                         };
-                        let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                        let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                         spawn(async move {
                             match api::set_order_status(&token, order_id, req).await {
                                 Ok(_) => {
@@ -123,14 +134,19 @@ pub fn OrdersPage(
                     "Update Status"
                 }
                 input { placeholder: "Order ID for split", value: "{order_split_id}", oninput: move |evt| order_split_id.set(evt.value()) }
-                input { placeholder: "Split by", value: "{order_split_by}", oninput: move |evt| order_split_by.set(evt.value()) }
+                select {
+                    value: "{order_split_by}",
+                    onchange: move |evt| order_split_by.set(evt.value()),
+                    option { value: "pickup_point", "Pickup Point" }
+                    option { value: "kitchen_station", "Kitchen Station" }
+                }
                 input { placeholder: "Split value", value: "{order_split_value}", oninput: move |evt| order_split_value.set(evt.value()) }
                 input { placeholder: "Quantity", value: "{order_split_quantity}", oninput: move |evt| order_split_quantity.set(evt.value()) }
                 button {
                     onclick: move |_| {
                         if let (Ok(order_id), Ok(quantity)) = (order_split_id().parse::<i64>(), order_split_quantity().parse::<i32>()) {
                             let req = TicketSplitRequest { split_by: order_split_by(), split_value: order_split_value(), quantity };
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::add_ticket_split(&token, order_id, req).await {
                                     Ok(_) => status.set("Ticket split added".to_string()),
@@ -147,7 +163,7 @@ pub fn OrdersPage(
                     onclick: move |_| {
                         if let Ok(order_id) = order_note_id().parse::<i64>() {
                             let req = OrderNoteRequest { note: order_note_text() };
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::add_order_note(&token, order_id, req).await {
                                     Ok(_) => status.set("Order note added".to_string()),
@@ -162,7 +178,7 @@ pub fn OrdersPage(
                     class: "primary",
                     onclick: move |_| {
                         if let Ok(order_id) = order_note_id().parse::<i64>() {
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 if let Ok(items) = api::list_order_notes(&token, order_id).await {
                                     order_note_timeline.set(items);

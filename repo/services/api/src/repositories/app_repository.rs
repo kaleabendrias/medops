@@ -93,6 +93,7 @@ pub trait AppRepository: Send + Sync {
     async fn create_session(&self, token: &str, user_id: i64) -> Result<(), ApiError>;
     async fn get_session(&self, token: &str) -> Result<Option<SessionRecord>, ApiError>;
     async fn touch_session(&self, token: &str) -> Result<(), ApiError>;
+    async fn delete_session(&self, token: &str) -> Result<(), ApiError>;
     async fn revoke_user_sessions(&self, user_id: i64) -> Result<(), ApiError>;
     async fn user_has_permission(&self, role_name: &str, permission_key: &str) -> Result<bool, ApiError>;
     async fn list_menu_entitlements(&self, role_name: &str) -> Result<Vec<MenuEntitlementDto>, ApiError>;

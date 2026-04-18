@@ -34,7 +34,7 @@ pub fn IngestionPage(
             button {
                 class: "primary",
                 onclick: move |_| {
-                    let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                    let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                     spawn(async move {
                         match api::list_ingestion_tasks(&token).await {
                             Ok(items) => ingestion_tasks.set(items),
@@ -70,7 +70,7 @@ pub fn IngestionPage(
                                 incremental_field: Some(ingestion_incremental_field()),
                                 schedule_cron: ingestion_schedule(),
                             };
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::create_ingestion_task(&token, req).await {
                                     Ok(id) => {
@@ -104,7 +104,7 @@ pub fn IngestionPage(
                                 incremental_field: Some(ingestion_incremental_field()),
                                 schedule_cron: ingestion_schedule(),
                             };
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::update_ingestion_task(&token, task_id, req).await {
                                     Ok(version) => status.set(format!("Task updated to version {version}")),
@@ -121,7 +121,7 @@ pub fn IngestionPage(
                 button {
                     onclick: move |_| {
                         if let Ok(task_id) = ingestion_selected_task().parse::<i64>() {
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::run_ingestion_task(&token, task_id).await {
                                     Ok(_) => status.set("Ingestion run started".to_string()),
@@ -135,7 +135,7 @@ pub fn IngestionPage(
                 button {
                     onclick: move |_| {
                         if let Ok(task_id) = ingestion_selected_task().parse::<i64>() {
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 if let Ok(v) = api::ingestion_task_versions(&token, task_id).await {
                                     ingestion_versions.set(v);
@@ -160,7 +160,7 @@ pub fn IngestionPage(
                                 target_version,
                                 reason: ingestion_rollback_reason(),
                             };
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::rollback_ingestion_task(&token, task_id, req).await {
                                     Ok(version) => status.set(format!("Rollback created version {version}")),

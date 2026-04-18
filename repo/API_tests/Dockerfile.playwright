@@ -1,0 +1,5 @@
+FROM mcr.microsoft.com/playwright:v1.47.0-jammy
+# Playwright browsers and Node.js are pre-installed in this image.
+# Install @playwright/test globally so npx can find it without a local node_modules.
+RUN npm install -g @playwright/test@1.47.0
+WORKDIR /workspace

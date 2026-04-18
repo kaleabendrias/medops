@@ -43,7 +43,7 @@ pub fn DiningPage(
             button {
                 class: "primary",
                 onclick: move |_| {
-                    let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                    let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                     spawn(async move {
                         if let Ok(items) = api::list_dish_categories(&token).await { categories.set(items); }
                         if let Ok(items) = api::list_dishes(&token).await { dishes.set(items); }
@@ -74,7 +74,7 @@ pub fn DiningPage(
                                     base_price_cents,
                                     photo_path: dish_photo_path(),
                                 };
-                                let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                                let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                                 spawn(async move {
                                     match api::create_dish(&token, req).await {
                                         Ok(id) => status.set(format!("Dish created #{id}")),
@@ -97,7 +97,7 @@ pub fn DiningPage(
                         onclick: move |_| {
                             if let Ok(id) = dish_status_id().parse::<i64>() {
                                 let req = DishStatusRequest { is_published: dish_published(), is_sold_out: dish_sold_out() };
-                                let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                                let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                                 spawn(async move {
                                     match api::set_dish_status(&token, id, req).await {
                                         Ok(_) => status.set("Dish status updated".to_string()),
@@ -116,7 +116,7 @@ pub fn DiningPage(
                         onclick: move |_| {
                             if let (Ok(id), Ok(delta)) = (dish_option_id().parse::<i64>(), dish_option_delta().parse::<i32>()) {
                                 let req = DishOptionRequest { option_group: dish_option_group(), option_value: dish_option_value(), delta_price_cents: delta };
-                                let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                                let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                                 spawn(async move {
                                     match api::add_dish_option(&token, id, req).await {
                                         Ok(_) => status.set("Dish option added".to_string()),
@@ -135,7 +135,7 @@ pub fn DiningPage(
                         onclick: move |_| {
                             if let Ok(id) = dish_window_id().parse::<i64>() {
                                 let req = DishWindowRequest { slot_name: dish_window_slot(), start_hhmm: dish_window_start(), end_hhmm: dish_window_end() };
-                                let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                                let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                                 spawn(async move {
                                     match api::add_sales_window(&token, id, req).await {
                                         Ok(_) => status.set("Sales window added".to_string()),
@@ -157,7 +157,7 @@ pub fn DiningPage(
                     onclick: move |_| {
                         if let Ok(weight) = ranking_rule_weight().parse::<f64>() {
                             let req = RankingRuleRequest { rule_key: ranking_rule_key(), weight, enabled: ranking_rule_enabled() };
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::upsert_ranking_rule(&token, req).await {
                                     Ok(_) => status.set("Ranking rule updated".to_string()),

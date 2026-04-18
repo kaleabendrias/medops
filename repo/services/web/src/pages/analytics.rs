@@ -18,7 +18,7 @@ pub fn AnalyticsPage(
             button {
                 class: "primary",
                 onclick: move |_| {
-                    let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                    let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                     spawn(async move {
                         if let Ok(items) = api::funnel_metrics(&token).await { funnel.set(items); }
                         if let Ok(items) = api::retention_metrics(&token).await { retention.set(items); }

@@ -54,7 +54,7 @@ pub struct AuthLoginRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthLoginResponse {
-    pub token: String,
+    pub csrf_token: String,
     pub user_id: i64,
     pub username: String,
     pub role: String,

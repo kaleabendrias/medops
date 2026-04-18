@@ -98,6 +98,7 @@ fn build_rocket(cfg: &AppConfig, state: AppState) -> Rocket<Build> {
             .map(From::from)
             .collect(),
         allow_credentials: true,
+        allowed_headers: rocket_cors::AllowedHeaders::some(&["Content-Type", "X-CSRF-Token"]),
         ..Default::default()
     }
     .to_cors()
@@ -116,6 +117,7 @@ fn build_rocket(cfg: &AppConfig, state: AppState) -> Rocket<Build> {
             routes![
                 health,
                 routes::auth::login,
+                routes::auth::logout,
                 routes::catalog::hospitals,
                 routes::catalog::roles,
                 routes::rbac::menu_entitlements,

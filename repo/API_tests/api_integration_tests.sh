@@ -4,7 +4,7 @@ set -euo pipefail
 REPORT_DIR="${1:-test_reports}"
 mkdir -p "$REPORT_DIR"
 
-API_BASE="http://localhost:8000/api/v1"
+API_BASE="http://api:8000/api/v1"
 CASE_FILE="$REPORT_DIR/api_integration_tests.ndjson"
 : >"$CASE_FILE"
 RUN_ID=$(date +%s)
@@ -29,38 +29,61 @@ pass_case() {
 }
 
 mysql_query() {
-  docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "$1" 2>/dev/null
+  mysql -h mysql --ssl=0 -N -uapp_user hospital_platform -e "$1" 2>/dev/null
 }
 
-login_response() {
+# login_user: returns "cookie_val|csrf_token" composite used by api_call / direct curl helpers
+login_user() {
+  local username="$1"
+  local password="$2"
+  local tmpheaders="/tmp/login_headers_${username}_$$.txt"
+  local tmpbody="/tmp/login_body_${username}_$$.json"
+  curl -s -D "$tmpheaders" -o "$tmpbody" \
+    -X POST "$API_BASE/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"$username\",\"password\":\"$password\"}"
+  local cookie_val
+  cookie_val=$(grep -i "^set-cookie:" "$tmpheaders" \
+    | grep "hospital_session" \
+    | sed 's/.*hospital_session=\([^;]*\).*/\1/' \
+    | tr -d '\r' | head -1)
+  local csrf_token
+  csrf_token=$(python3 -c "import json; print(json.load(open('$tmpbody'))['csrf_token'])" 2>/dev/null || echo "")
+  rm -f "$tmpheaders" "$tmpbody"
+  echo "${cookie_val}|${csrf_token}"
+}
+
+login_user_id() {
   local username="$1"
   local password="$2"
   curl -s -X POST "$API_BASE/auth/login" \
     -H "Content-Type: application/json" \
-    -d "{\"username\":\"$username\",\"password\":\"$password\"}"
-}
-
-login_token() {
-  login_response "$1" "$2" | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])'
-}
-
-login_user_id() {
-  login_response "$1" "$2" | python3 -c 'import sys,json; print(json.load(sys.stdin)["user_id"])'
+    -d "{\"username\":\"$username\",\"password\":\"$password\"}" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["user_id"])'
 }
 
 api_call() {
   local method="$1"
   local path="$2"
-  local token="${3:-}"
+  local auth="${3:-}"
   local data="${4:-}"
-  if [ -n "$token" ] && [ -n "$data" ]; then
-    curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X "$method" "$API_BASE$path" -H "X-Session-Token: $token" -H "Content-Type: application/json" -d "$data"
-  elif [ -n "$token" ]; then
-    curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X "$method" "$API_BASE$path" -H "X-Session-Token: $token"
-  elif [ -n "$data" ]; then
-    curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X "$method" "$API_BASE$path" -H "Content-Type: application/json" -d "$data"
+  local cookie_args=()
+  local csrf_args=()
+  if [ -n "$auth" ]; then
+    local cookie_val="${auth%%|*}"
+    local csrf_token="${auth##*|}"
+    [ -n "$cookie_val" ] && cookie_args=(--cookie "hospital_session=${cookie_val}")
+    case "$method" in
+      POST|PUT|DELETE|PATCH)
+        [ -n "$csrf_token" ] && csrf_args=(-H "X-CSRF-Token: ${csrf_token}") ;;
+    esac
+  fi
+  if [ -n "$data" ]; then
+    curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X "$method" "$API_BASE$path" \
+      "${cookie_args[@]}" "${csrf_args[@]}" -H "Content-Type: application/json" -d "$data"
   else
-    curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X "$method" "$API_BASE$path"
+    curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X "$method" "$API_BASE$path" \
+      "${cookie_args[@]}" "${csrf_args[@]}"
   fi
 }
 
@@ -74,11 +97,58 @@ assert_code() {
   pass_case "$case_name" "received $actual"
 }
 
-admin_token=$(login_token "admin" "Admin#OfflinePass123")
-member_token=$(login_token "member1" "Admin#OfflinePass123")
+admin_token=$(login_user "admin" "Admin#OfflinePass123")
+member_token=$(login_user "member1" "Admin#OfflinePass123")
 member_user_id=$(login_user_id "member1" "Admin#OfflinePass123")
 clinical_user_id=$(login_user_id "clinical1" "Admin#OfflinePass123")
 cafeteria_user_id=$(login_user_id "cafeteria1" "Admin#OfflinePass123")
+
+# Explicit bootstrap validation: fail early if any login produced empty tokens
+# rather than allowing cascading failures downstream with cryptic error messages.
+admin_cookie="${admin_token%%|*}"
+admin_csrf="${admin_token##*|}"
+if [ -z "$admin_cookie" ] || [ -z "$admin_csrf" ]; then
+  fail_case "login_bootstrap_admin" "admin login failed: cookie='${admin_cookie}' csrf='${admin_csrf}'"
+fi
+pass_case "login_bootstrap_admin" "admin session cookie and csrf_token are non-empty"
+
+member_cookie="${member_token%%|*}"
+member_csrf="${member_token##*|}"
+if [ -z "$member_cookie" ] || [ -z "$member_csrf" ]; then
+  fail_case "login_bootstrap_member" "member1 login failed: cookie='${member_cookie}' csrf='${member_csrf}'"
+fi
+pass_case "login_bootstrap_member" "member1 session cookie and csrf_token are non-empty"
+
+if [ -z "$member_user_id" ]; then
+  fail_case "login_bootstrap_member_user_id" "failed to retrieve member1 user_id from login response"
+fi
+pass_case "login_bootstrap_member_user_id" "member1 user_id resolved: ${member_user_id}"
+
+# Validate the full login response body shape for admin before continuing.
+# A fresh curl is used because login_user() discards the body after parsing.
+curl -s -X POST "$API_BASE/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"Admin#OfflinePass123"}' \
+  > /tmp/login_schema_check.json
+login_schema_ok=$(python3 - <<'PY'
+import json
+with open('/tmp/login_schema_check.json') as f:
+    data = json.load(f)
+required = ['csrf_token', 'user_id', 'username', 'role', 'expires_in_minutes']
+ok = all(k in data for k in required)
+ok = ok and isinstance(data.get('csrf_token'), str) and len(data['csrf_token']) == 64
+ok = ok and all(c in '0123456789abcdef' for c in data.get('csrf_token', ''))
+ok = ok and data.get('username') == 'admin'
+ok = ok and data.get('role') == 'admin'
+ok = ok and isinstance(data.get('user_id'), int)
+ok = ok and isinstance(data.get('expires_in_minutes'), int)
+print('1' if ok else '0')
+PY
+)
+if [ "$login_schema_ok" != "1" ]; then
+  fail_case "login_response_schema" "login response missing required fields or csrf_token is not 64 hex chars"
+fi
+pass_case "login_response_schema" "login response contains csrf_token (64 hex), user_id, username, role, expires_in_minutes"
 
 mysql_query "UPDATE users SET is_disabled = 0, failed_attempts = 0, locked_until = NULL WHERE username IN ('admin','member1','clinical1','cafeteria1','lockout_user');"
 
@@ -99,6 +169,24 @@ assert_code "rbac_denial_member_patient_search" "403" "$code"
 
 code=$(api_call "GET" "/patients/search?q=john" "$admin_token")
 assert_code "rbac_allow_admin_patient_search" "200" "$code"
+# Validate search response shape: must be a JSON array; non-empty items need mrn/first_name/last_name
+search_schema_ok=$(python3 - <<'PY'
+import json
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+if not isinstance(data, list):
+    print('0')
+elif len(data) == 0:
+    print('1')
+else:
+    ok = all('mrn' in x and 'first_name' in x and 'last_name' in x for x in data)
+    print('1' if ok else '0')
+PY
+)
+if [ "$search_schema_ok" != "1" ]; then
+  fail_case "admin_patient_search_response_schema" "patient search response missing required mrn/first_name/last_name fields"
+fi
+pass_case "admin_patient_search_response_schema" "patient search response has expected schema"
 
 code=$(api_call "GET" "/hospitals")
 assert_code "catalog_hospitals_require_auth" "401" "$code"
@@ -108,6 +196,27 @@ assert_code "catalog_hospitals_require_authorization" "403" "$code"
 
 code=$(api_call "GET" "/hospitals" "$admin_token")
 assert_code "catalog_hospitals_admin_allowed" "200" "$code"
+# Validate hospitals response schema: must be a non-empty array with id, code, name
+hospitals_schema_ok=$(python3 - <<'PY'
+import json
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+if not isinstance(data, list) or len(data) == 0:
+    print('0')
+else:
+    ok = all(
+        isinstance(x.get('id'), int) and
+        isinstance(x.get('code'), str) and len(x.get('code', '')) > 0 and
+        isinstance(x.get('name'), str) and len(x.get('name', '')) > 0
+        for x in data
+    )
+    print('1' if ok else '0')
+PY
+)
+if [ "$hospitals_schema_ok" != "1" ]; then
+  fail_case "catalog_hospitals_response_schema" "hospitals response missing required id/code/name fields or returned empty array"
+fi
+pass_case "catalog_hospitals_response_schema" "hospitals response contains objects with non-empty id, code, name fields"
 
 for i in 1 2 3 4 5; do
   code=$(api_call "POST" "/auth/login" "" '{"username":"lockout_user","password":"Wrong#Password123"}')
@@ -120,12 +229,12 @@ pass_case "lockout_failed_attempts" "five failed logins recorded"
 code=$(api_call "POST" "/auth/login" "" '{"username":"lockout_user","password":"Admin#OfflinePass123"}')
 assert_code "lockout_enforced_after_failures" "400" "$code"
 
-session_timeout_token=$(login_token "member1" "Admin#OfflinePass123")
-mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 481 MINUTE) WHERE session_token_hash = SHA2('$session_timeout_token', 256);"
+session_timeout_token=$(login_user "member1" "Admin#OfflinePass123")
+mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 481 MINUTE) WHERE user_id = (SELECT id FROM users WHERE username = 'member1') AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1;"
 code=$(api_call "GET" "/session" "$session_timeout_token")
 assert_code "session_timeout_enforced" "401" "$code"
 
-member_live_token=$(login_token "member1" "Admin#OfflinePass123")
+member_live_token=$(login_user "member1" "Admin#OfflinePass123")
 code=$(api_call "POST" "/admin/users/$member_user_id/disable" "$admin_token")
 assert_code "admin_disable_user" "200" "$code"
 code=$(api_call "GET" "/orders" "$member_live_token")
@@ -136,29 +245,32 @@ if [ "$member_disabled" != "0" ]; then
   fail_case "admin_disable_cleanup_reenable" "failed to restore member1 active state"
 fi
 pass_case "admin_disable_cleanup_reenable" "restored member1 active state for downstream suites"
-member_token=$(login_token "member1" "Admin#OfflinePass123")
+member_token=$(login_user "member1" "Admin#OfflinePass123")
 
 patient_payload="{\"mrn\":\"MRN-T001-$RUN_ID\",\"first_name\":\"Test\",\"last_name\":\"Patient\",\"birth_date\":\"1990-01-01\",\"gender\":\"F\",\"phone\":\"555-1111\",\"email\":\"test.patient+$RUN_ID@example.local\",\"allergies\":\"none\",\"contraindications\":\"none\",\"history\":\"baseline\"}"
 code=$(api_call "POST" "/patients" "$admin_token" "$patient_payload")
 assert_code "create_patient_for_scenarios" "200" "$code"
 patient_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.json")))')
 
-clinical_token=$(login_token "clinical1" "Admin#OfflinePass123")
-cafeteria_token=$(login_token "cafeteria1" "Admin#OfflinePass123")
+clinical_token=$(login_user "clinical1" "Admin#OfflinePass123")
+cafeteria_token=$(login_user "cafeteria1" "Admin#OfflinePass123")
 code=$(api_call "POST" "/orders" "$clinical_token" "{\"patient_id\":$patient_id,\"menu_id\":1,\"notes\":\"clinical-forbidden\"}")
-assert_code "order_requires_explicit_assignment" "403" "$code"
+assert_code "order_requires_explicit_assignment" "404" "$code"
 
 code=$(api_call "GET" "/patients/search?q=test" "$cafeteria_token")
 assert_code "cafeteria_role_isolation_patient_search" "403" "$code"
 
 code=$(api_call "GET" "/patients/$patient_id" "$clinical_token")
-assert_code "patient_object_isolation_before_assignment" "403" "$code"
+assert_code "patient_object_isolation_before_assignment" "404" "$code"
 
 code=$(api_call "GET" "/patients/$patient_id/attachments" "$clinical_token")
-assert_code "attachment_object_isolation_before_assignment" "403" "$code"
+assert_code "attachment_object_isolation_before_assignment" "404" "$code"
 
 code=$(api_call "POST" "/patients/$patient_id/assign" "$admin_token" "{\"target_user_id\":$clinical_user_id,\"assignment_type\":\"care_team\"}")
 assert_code "patient_assignment_create" "200" "$code"
+
+code=$(api_call "POST" "/patients/$patient_id/assign" "$admin_token" "{\"target_user_id\":$member_user_id,\"assignment_type\":\"viewer\"}")
+assert_code "member_patient_assignment_early" "200" "$code"
 
 code=$(api_call "GET" "/patients/$patient_id" "$clinical_token")
 assert_code "patient_object_access_after_assignment" "200" "$code"
@@ -269,14 +381,14 @@ bad_update='{"first_name":"Updated","last_name":"Patient","birth_date":"1990-01-
 code=$(api_call "PUT" "/patients/$patient_id" "$admin_token" "$bad_update")
 assert_code "patient_revision_reason_required" "400" "$code"
 
-invalid_attachment_code=$(curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X POST "$API_BASE/patients/$patient_id/attachments?filename=payload.exe&mime_type=application/octet-stream" -H "X-Session-Token: $admin_token" --data-binary "malicious")
+invalid_attachment_code=$(curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X POST "$API_BASE/patients/$patient_id/attachments?filename=payload.exe&mime_type=application/octet-stream" --cookie "hospital_session=${admin_token%%|*}" -H "X-CSRF-Token: ${admin_token##*|}" --data-binary "malicious")
 assert_code "attachment_type_constraint" "400" "$invalid_attachment_code"
 
 python3 - <<'PY'
 with open('/tmp/oversize_attachment.bin', 'wb') as f:
     f.write(b'A' * (26 * 1024 * 1024))
 PY
-oversize_code=$(curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X POST "$API_BASE/patients/$patient_id/attachments?filename=big.pdf&mime_type=application/pdf" -H "X-Session-Token: $admin_token" --data-binary @/tmp/oversize_attachment.bin)
+oversize_code=$(curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X POST "$API_BASE/patients/$patient_id/attachments?filename=big.pdf&mime_type=application/pdf" --cookie "hospital_session=${admin_token%%|*}" -H "X-CSRF-Token: ${admin_token##*|}" --data-binary @/tmp/oversize_attachment.bin)
 assert_code "attachment_size_constraint" "413" "$oversize_code"
 
 python3 - <<'PY'
@@ -284,7 +396,7 @@ with open('/tmp/binary-attachment.pdf', 'wb') as f:
     payload = b'%PDF-1.4 ' + bytes([0, 1, 2, 3, 10, 13, 255, 128, 64, 32]) + b'BINARY-CONTENT' + bytes(range(16))
     f.write(payload)
 PY
-binary_upload_code=$(curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X POST "$API_BASE/patients/$patient_id/attachments?filename=binary-roundtrip.pdf&mime_type=application/pdf" -H "X-Session-Token: $admin_token" --data-binary @/tmp/binary-attachment.pdf)
+binary_upload_code=$(curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X POST "$API_BASE/patients/$patient_id/attachments?filename=binary-roundtrip.pdf&mime_type=application/pdf" --cookie "hospital_session=${admin_token%%|*}" -H "X-CSRF-Token: ${admin_token##*|}" --data-binary @/tmp/binary-attachment.pdf)
 assert_code "attachment_binary_upload" "200" "$binary_upload_code"
 
 code=$(api_call "GET" "/patients/$patient_id/attachments" "$admin_token")
@@ -301,7 +413,7 @@ if [ -z "$binary_attachment_id" ]; then
   fail_case "attachment_binary_metadata" "uploaded binary attachment not found in metadata"
 fi
 
-binary_download_code=$(curl -s -o /tmp/binary-download.pdf -w "%{http_code}" -X GET "$API_BASE/patients/$patient_id/attachments/$binary_attachment_id/download" -H "X-Session-Token: $admin_token")
+binary_download_code=$(curl -s -o /tmp/binary-download.pdf -w "%{http_code}" -X GET "$API_BASE/patients/$patient_id/attachments/$binary_attachment_id/download" --cookie "hospital_session=${admin_token%%|*}")
 assert_code "attachment_binary_download" "200" "$binary_download_code"
 orig_hash=$(sha256sum /tmp/binary-attachment.pdf | awk '{print $1}')
 down_hash=$(sha256sum /tmp/binary-download.pdf | awk '{print $1}')
@@ -336,7 +448,7 @@ if [ "$nullable" != "NO" ]; then
 fi
 pass_case "attachment_blob_not_null" "payload_blob column enforces NOT NULL constraint"
 
-beds_json=$(curl -s -X GET "$API_BASE/bedboard/beds" -H "X-Session-Token: $admin_token")
+beds_json=$(curl -s -X GET "$API_BASE/bedboard/beds" --cookie "hospital_session=${admin_token%%|*}")
 bed_id=$(python3 -c 'import sys,json; data=json.load(sys.stdin); print(data[0]["id"])' <<<"$beds_json")
 bed_state=$(python3 -c 'import sys,json; data=json.load(sys.stdin); print(data[0]["state"])' <<<"$beds_json")
 legal_target=$(python3 - <<PY
@@ -372,7 +484,7 @@ assert_code "campaign_dish_sales_window" "200" "$code"
 
 code=$(api_call "POST" "/dining/menus" "$admin_token" '{"menu_date":"2026-01-01","meal_period":"Lunch","item_name":"Campaign Meal","calories":500}')
 assert_code "campaign_menu_create" "200" "$code"
-campaign_menus_json=$(curl -s -X GET "$API_BASE/dining/menus" -H "X-Session-Token: $admin_token")
+campaign_menus_json=$(curl -s -X GET "$API_BASE/dining/menus" --cookie "hospital_session=${admin_token%%|*}")
 campaign_menu_id=$(python3 -c 'import sys,json; data=json.load(sys.stdin); print(data[0]["id"])' <<<"$campaign_menus_json")
 
 code=$(api_call "POST" "/campaigns" "$admin_token" "{\"title\":\"Order Success Campaign\",\"dish_id\":$campaign_dish_id,\"success_threshold\":2,\"success_deadline_at\":\"2099-01-01 10:30:00\"}")
@@ -468,7 +580,7 @@ assert_code "test_meal_dish_sales_window" "200" "$code"
 
 code=$(api_call "POST" "/dining/menus" "$admin_token" '{"menu_date":"2026-01-01","meal_period":"Lunch","item_name":"Test Meal","calories":500}')
 assert_code "menu_create" "200" "$code"
-menus_json=$(curl -s -X GET "$API_BASE/dining/menus" -H "X-Session-Token: $admin_token")
+menus_json=$(curl -s -X GET "$API_BASE/dining/menus" --cookie "hospital_session=${admin_token%%|*}")
 menu_id=$(python3 -c 'import sys,json; data=json.load(sys.stdin); print(data[-1]["id"])' <<<"$menus_json")
 
 code=$(api_call "POST" "/orders" "$admin_token" "{\"patient_id\":$patient_id,\"menu_id\":$menu_id,\"notes\":\"integration order\"}")
@@ -484,15 +596,19 @@ assert_code "create_order_for_cross_user_access_checks" "200" "$code"
 isolated_order_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.json")))')
 
 code=$(api_call "POST" "/orders/$isolated_order_id/notes" "$clinical_token" '{"note":"forbidden"}')
-assert_code "order_note_cross_user_forbidden" "403" "$code"
+assert_code "order_note_cross_user_forbidden" "404" "$code"
 code=$(api_call "GET" "/orders/$isolated_order_id/notes" "$clinical_token")
-assert_code "order_notes_cross_user_forbidden" "403" "$code"
-code=$(api_call "POST" "/orders/$isolated_order_id/ticket-splits" "$clinical_token" '{"split_by":"room","split_value":"A-1","quantity":1}')
-assert_code "ticket_split_cross_user_forbidden" "403" "$code"
+assert_code "order_notes_cross_user_forbidden" "404" "$code"
+code=$(api_call "POST" "/orders/$isolated_order_id/ticket-splits" "$clinical_token" '{"split_by":"pickup_point","split_value":"A-1","quantity":1}')
+assert_code "ticket_split_cross_user_forbidden" "404" "$code"
 code=$(api_call "GET" "/orders/$isolated_order_id/ticket-splits" "$clinical_token")
-assert_code "ticket_splits_cross_user_forbidden" "403" "$code"
+assert_code "ticket_splits_cross_user_forbidden" "404" "$code"
 
 # ── Member cross-patient order isolation (object-level authz) ──
+# Assign member1 to the test patient so they can place a self-service order
+code=$(api_call "POST" "/patients/$patient_id/assign" "$admin_token" "{\"target_user_id\":$member_user_id,\"assignment_type\":\"viewer\"}")
+assert_code "member_patient_assignment_for_self_service" "200" "$code"
+
 # Member creates an order (self-service), then tries to access admin-created orders.
 # All cross-user access must be denied to prevent ID enumeration attacks.
 code=$(api_call "POST" "/orders" "$member_token" "{\"patient_id\":$patient_id,\"menu_id\":$menu_id,\"notes\":\"member-own-order\"}")
@@ -501,17 +617,17 @@ member_own_order_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_te
 
 # Member must NOT read orders created by admin
 code=$(api_call "GET" "/orders/$isolated_order_id/notes" "$member_token")
-assert_code "member_cross_patient_read_notes_forbidden" "403" "$code"
+assert_code "member_cross_patient_read_notes_forbidden" "404" "$code"
 code=$(api_call "GET" "/orders/$isolated_order_id/ticket-splits" "$member_token")
-assert_code "member_cross_patient_read_splits_forbidden" "403" "$code"
+assert_code "member_cross_patient_read_splits_forbidden" "404" "$code"
 
 # Member must NOT mutate orders created by admin
 code=$(api_call "PUT" "/orders/$isolated_order_id/status" "$member_token" '{"status":"Canceled","reason":"unauthorized attempt"}')
-assert_code "member_cross_patient_status_update_forbidden" "403" "$code"
+assert_code "member_cross_patient_status_update_forbidden" "404" "$code"
 code=$(api_call "POST" "/orders/$isolated_order_id/notes" "$member_token" '{"note":"unauthorized note"}')
-assert_code "member_cross_patient_add_note_forbidden" "403" "$code"
-code=$(api_call "POST" "/orders/$isolated_order_id/ticket-splits" "$member_token" '{"split_by":"ward","split_value":"X","quantity":1}')
-assert_code "member_cross_patient_add_split_forbidden" "403" "$code"
+assert_code "member_cross_patient_add_note_forbidden" "404" "$code"
+code=$(api_call "POST" "/orders/$isolated_order_id/ticket-splits" "$member_token" '{"split_by":"pickup_point","split_value":"X","quantity":1}')
+assert_code "member_cross_patient_add_split_forbidden" "404" "$code"
 
 # Member CAN access their own order (positive check)
 code=$(api_call "POST" "/orders/$member_own_order_id/notes" "$member_token" '{"note":"my own note"}')
@@ -595,7 +711,7 @@ cancel_order_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_b
 code=$(api_call "PUT" "/orders/$cancel_order_id/status" "$admin_token" '{"status":"Canceled","reason":"patient unavailable"}')
 assert_code "order_cancel_transition" "200" "$code"
 
-code=$(api_call "POST" "/orders/$order_id/ticket-splits" "$admin_token" '{"split_by":"ward","split_value":"north","quantity":2}')
+code=$(api_call "POST" "/orders/$order_id/ticket-splits" "$admin_token" '{"split_by":"pickup_point","split_value":"north","quantity":2}')
 assert_code "order_ticket_split_add" "200" "$code"
 code=$(api_call "GET" "/orders/$order_id/ticket-splits" "$admin_token")
 assert_code "order_ticket_split_list" "200" "$code"
@@ -650,11 +766,11 @@ fi
 pass_case "audit_append_only_growth" "audit log count increased from $audit_before to $audit_after"
 
 set +e
-audit_mutation_code=$(curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X PUT "$API_BASE/audits" -H "X-Session-Token: $admin_token" -H "Content-Type: application/json" -d '{"action_type":"tamper"}')
-audit_delete_code=$(curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X DELETE "$API_BASE/audits" -H "X-Session-Token: $admin_token")
-mysql_update_out=$(docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "UPDATE audit_logs SET action_type='tamper' WHERE id = 1;" 2>&1)
+audit_mutation_code=$(curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X PUT "$API_BASE/audits" --cookie "hospital_session=${admin_token%%|*}" -H "X-CSRF-Token: ${admin_token##*|}" -H "Content-Type: application/json" -d '{"action_type":"tamper"}')
+audit_delete_code=$(curl -s -o /tmp/api_test_body.json -w "%{http_code}" -X DELETE "$API_BASE/audits" --cookie "hospital_session=${admin_token%%|*}" -H "X-CSRF-Token: ${admin_token##*|}")
+mysql_update_out=$(mysql -h mysql --ssl=0 -uapp_user hospital_platform -e "UPDATE audit_logs SET action_type='tamper' WHERE id = 1;" 2>&1)
 mysql_update_rc=$?
-mysql_delete_out=$(docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "DELETE FROM audit_logs WHERE id = 1;" 2>&1)
+mysql_delete_out=$(mysql -h mysql --ssl=0 -uapp_user hospital_platform -e "DELETE FROM audit_logs WHERE id = 1;" 2>&1)
 mysql_delete_rc=$?
 set -e
 if [ "$audit_mutation_code" != "400" ]; then
@@ -695,6 +811,17 @@ pass_case "audit_immutability" "audit log remains append-only; historical rows u
 code=$(api_call "POST" "/governance/records" "$admin_token" '{"tier":"raw","lineage_source_id":null,"lineage_metadata":"seed:raw","payload_json":"{\"batch\":1}"}')
 assert_code "governance_create_raw" "200" "$code"
 raw_record_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.json")))')
+gov_create_raw_schema_ok=$(python3 - <<'PY'
+import json
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+print('1' if isinstance(data, int) and data > 0 else '0')
+PY
+)
+if [ "$gov_create_raw_schema_ok" != "1" ]; then
+  fail_case "governance_create_raw_response_schema" "expected positive integer id for created governance record"
+fi
+pass_case "governance_create_raw_response_schema" "governance create returns a positive integer record id"
 
 code=$(api_call "POST" "/governance/records" "$admin_token" "{\"tier\":\"cleaned\",\"lineage_source_id\":$raw_record_id,\"lineage_metadata\":\"lineage:raw_to_cleaned\",\"payload_json\":\"{\\\"batch\\\":2}\"}")
 assert_code "governance_create_cleaned" "200" "$code"
@@ -702,6 +829,24 @@ cleaned_record_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test
 
 code=$(api_call "GET" "/governance/records" "$admin_token")
 assert_code "governance_list_records" "200" "$code"
+governance_list_schema_ok=$(python3 - <<'PY'
+import json
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+if not isinstance(data, list):
+    print('0')
+elif not data:
+    print('1')
+else:
+    required = {'id', 'tier', 'tombstoned', 'payload_json', 'lineage_metadata'}
+    ok = all(required.issubset(x.keys()) for x in data[:5])
+    print('1' if ok else '0')
+PY
+)
+if [ "$governance_list_schema_ok" != "1" ]; then
+  fail_case "governance_list_response_schema" "governance list missing required id/tier/tombstoned/payload_json/lineage_metadata fields"
+fi
+pass_case "governance_list_response_schema" "governance list response contains expected schema fields"
 lineage_ok=$(python3 - <<PY
 import json
 raw_id = $raw_record_id
@@ -797,21 +942,24 @@ fi
 
 external_ingestion_payload='{"task_name":"ssrf-probe","seed_urls":["https://evil.example.com/data"],"extraction_rules_json":"{\"mode\":\"css\",\"fields\":[\".record\"]}","pagination_strategy":"breadth-first","max_depth":1,"incremental_field":"value","schedule_cron":"0 * * * *"}'
 code=$(api_call "POST" "/ingestion/tasks" "$admin_token" "$external_ingestion_payload")
-assert_code "ingestion_reject_external_url" "200" "$code"
-ssrf_task_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.json")))')
-code=$(api_call "POST" "/ingestion/tasks/$ssrf_task_id/run" "$admin_token" '')
-assert_code "ingestion_run_external_url_rejected" "200" "$code"
-sleep 2
-ssrf_run_status=$(docker compose exec -T mysql mysql -N -uapp_user -papp_password_local hospital_platform -e "SELECT status FROM ingestion_task_runs WHERE task_id = $ssrf_task_id ORDER BY id DESC LIMIT 1;" 2>/dev/null)
-if [ "$ssrf_run_status" != "failed" ]; then
-  fail_case "ingestion_ssrf_blocked" "expected external URL ingestion to fail, got status: $ssrf_run_status"
-fi
-pass_case "ingestion_ssrf_blocked" "external/public seed URLs are rejected by intranet allowlist"
+assert_code "ingestion_reject_external_url" "400" "$code"
+pass_case "ingestion_ssrf_blocked" "external/public seed URLs are rejected at creation time by intranet allowlist"
 
 ingestion_create_payload='{"task_name":"patient-feed","seed_urls":["file:///app/config/ingestion_fixture/page1.html"],"extraction_rules_json":"{\"mode\":\"css\",\"fields\":[\".record\"],\"pagination_selector\":\"a.next\"}","pagination_strategy":"depth-first","max_depth":2,"incremental_field":"value","schedule_cron":"0 * * * *"}'
 code=$(api_call "POST" "/ingestion/tasks" "$admin_token" "$ingestion_create_payload")
 assert_code "ingestion_create_task" "200" "$code"
 ingestion_task_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.json")))')
+ingestion_create_schema_ok=$(python3 - <<'PY'
+import json
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+print('1' if isinstance(data, int) and data > 0 else '0')
+PY
+)
+if [ "$ingestion_create_schema_ok" != "1" ]; then
+  fail_case "ingestion_create_response_schema" "expected positive integer task id from ingestion create"
+fi
+pass_case "ingestion_create_response_schema" "ingestion create returns a positive integer task id"
 
 code=$(api_call "GET" "/ingestion/tasks" "$admin_token")
 assert_code "ingestion_list_tasks" "200" "$code"
@@ -986,7 +1134,7 @@ fi
 pass_case "funnel_metrics_shape" "funnel metrics include expected steps"
 
 # ── Retention API contract tests ──
-code=$(api_call "GET" "/retention" "$admin_token")
+code=$(api_call "GET" "/retention/settings" "$admin_token")
 assert_code "retention_settings_accessible" "200" "$code"
 retention_keys=$(python3 - <<'PY'
 import json
@@ -1037,9 +1185,9 @@ fi
 pass_case "attachment_blob_column_type" "attachment payload stored as LONGBLOB in MySQL"
 
 # ── Resource access for nonexistent IDs ──
-# Nonexistent patients return 403 (can_access_patient returns false for missing IDs)
+# Nonexistent patients return 404 (privacy-preserving; prevents ID enumeration)
 code=$(api_call "GET" "/patients/999999" "$admin_token")
-assert_code "patient_nonexistent_denied" "403" "$code"
+assert_code "patient_nonexistent_denied" "404" "$code"
 
 code=$(api_call "GET" "/patients/$patient_id/attachments/999999/download" "$admin_token")
 assert_code "attachment_nonexistent_404" "404" "$code"
@@ -1054,10 +1202,10 @@ code=$(api_call "PUT" "/orders/999999/status" "$admin_token" '{"status":"Billed"
 assert_code "order_status_nonexistent_404" "404" "$code"
 
 code=$(api_call "GET" "/patients/999999/revisions" "$admin_token")
-assert_code "patient_revisions_nonexistent_denied" "403" "$code"
+assert_code "patient_revisions_nonexistent_denied" "404" "$code"
 
 code=$(api_call "GET" "/patients/999999/attachments" "$admin_token")
-assert_code "patient_attachments_nonexistent_denied" "403" "$code"
+assert_code "patient_attachments_nonexistent_denied" "404" "$code"
 
 # ── Invalid/revoked token route matrix ──
 invalid_token="totally-invalid-token-that-does-not-exist"
@@ -1091,22 +1239,35 @@ assert_code "invalid_token_audits_rejected" "401" "$code"
 code=$(api_call "GET" "/campaigns" "$invalid_token")
 assert_code "invalid_token_campaigns_rejected" "401" "$code"
 
-# Revoked token (disable user, then try their token)
-revoke_test_token=$(login_token "member1" "Admin#OfflinePass123")
-mysql_query "DELETE FROM sessions WHERE session_token_hash = SHA2('$revoke_test_token', 256);"
+# Revoked token (revoke the session, then try its cookie)
+revoke_test_token=$(login_user "member1" "Admin#OfflinePass123")
+mysql_query "UPDATE sessions SET revoked_at = NOW() WHERE user_id = (SELECT id FROM users WHERE username = 'member1') AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1;"
 code=$(api_call "GET" "/orders" "$revoke_test_token")
 assert_code "revoked_token_orders_rejected" "401" "$code"
 # Re-login member for downstream use
-member_token=$(login_token "member1" "Admin#OfflinePass123")
+member_token=$(login_user "member1" "Admin#OfflinePass123")
 
 # ── Session timeout boundary: exactly 480 minutes ──
-boundary_token=$(login_token "member1" "Admin#OfflinePass123")
-mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 479 MINUTE) WHERE session_token_hash = SHA2('$boundary_token', 256);"
+boundary_token=$(login_user "member1" "Admin#OfflinePass123")
+mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 479 MINUTE) WHERE user_id = (SELECT id FROM users WHERE username = 'member1') AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1;"
 code=$(api_call "GET" "/session" "$boundary_token")
 assert_code "session_active_at_479_minutes" "200" "$code"
+session_schema_ok=$(python3 - <<'PY'
+import json
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+required = {'cookie_name', 'secure', 'http_only', 'same_site', 'ttl_minutes'}
+ok = required.issubset(data.keys()) and isinstance(data.get('ttl_minutes'), int)
+print('1' if ok else '0')
+PY
+)
+if [ "$session_schema_ok" != "1" ]; then
+  fail_case "session_response_schema" "session endpoint missing cookie_name/secure/http_only/same_site/ttl_minutes fields"
+fi
+pass_case "session_response_schema" "session endpoint returns expected settings schema with integer ttl_minutes"
 
-boundary_token_expired=$(login_token "member1" "Admin#OfflinePass123")
-mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 481 MINUTE) WHERE session_token_hash = SHA2('$boundary_token_expired', 256);"
+boundary_token_expired=$(login_user "member1" "Admin#OfflinePass123")
+mysql_query "UPDATE sessions SET last_activity_at = DATE_SUB(NOW(), INTERVAL 481 MINUTE) WHERE user_id = (SELECT id FROM users WHERE username = 'member1') AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1;"
 code=$(api_call "GET" "/session" "$boundary_token_expired")
 assert_code "session_expired_at_481_minutes" "401" "$code"
 
@@ -1133,9 +1294,159 @@ assert_code "admin_users_deny_cafeteria" "403" "$code"
 # ── Audit immutability: PUT/DELETE via API ──
 code=$(api_call "GET" "/audits" "$admin_token")
 assert_code "audits_list_allow_admin" "200" "$code"
+audits_schema_ok=$(python3 - <<'PY'
+import json
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+if not isinstance(data, list):
+    print('0')
+elif not data:
+    print('1')
+else:
+    required = {'id', 'action_type', 'entity_type', 'actor_username', 'created_at'}
+    ok = all(required.issubset(x.keys()) and isinstance(x.get('id'), int) for x in data[:5])
+    print('1' if ok else '0')
+PY
+)
+if [ "$audits_schema_ok" != "1" ]; then
+  fail_case "audits_list_response_schema" "audit list missing required id/action_type/entity_type/actor_username/created_at fields"
+fi
+pass_case "audits_list_response_schema" "audit list response contains expected schema with integer id"
 
 code=$(api_call "GET" "/audits" "$member_token")
 assert_code "audits_deny_member" "403" "$code"
+
+# ── Patients: list and remaining clinical endpoints ──
+code=$(api_call "GET" "/patients" "$admin_token")
+assert_code "patients_list" "200" "$code"
+patients_count=$(python3 - <<'PY'
+import json
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+print(len(data))
+PY
+)
+if [ "$patients_count" -lt 1 ]; then
+  fail_case "patients_list_nonempty" "expected at least one patient in list"
+fi
+pass_case "patients_list_nonempty" "patient list returns populated results"
+
+code=$(api_call "PUT" "/patients/$patient_id/contraindications" "$admin_token" '{"value":"penicillin","reason_for_change":"contraindication update test"}')
+assert_code "patient_contraindications_update" "200" "$code"
+
+code=$(api_call "POST" "/patients/$patient_id/visit-notes" "$admin_token" '{"note":"Initial visit: patient stable","reason_for_change":"routine assessment"}')
+assert_code "patient_visit_note_add" "200" "$code"
+
+# ── Cafeteria: categories, options, ranking-rules, recommendations ──
+code=$(api_call "GET" "/cafeteria/categories" "$admin_token")
+assert_code "cafeteria_categories_list" "200" "$code"
+categories_schema_ok=$(python3 - <<'PY'
+import json
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+if not isinstance(data, list):
+    print('0')
+elif not data:
+    print('1')
+else:
+    ok = all(isinstance(x.get('id'), int) and isinstance(x.get('name'), str) and x.get('name') for x in data)
+    print('1' if ok else '0')
+PY
+)
+if [ "$categories_schema_ok" != "1" ]; then
+  fail_case "cafeteria_categories_response_schema" "categories response missing required id (int) / name (str) fields"
+fi
+pass_case "cafeteria_categories_response_schema" "cafeteria categories response contains integer id and non-empty name"
+
+code=$(api_call "POST" "/cafeteria/dishes/$campaign_dish_id/options" "$admin_token" '{"option_group":"size","option_value":"large","delta_price_cents":150}')
+assert_code "cafeteria_dish_option_add" "200" "$code"
+
+code=$(api_call "PUT" "/cafeteria/ranking-rules" "$admin_token" '{"rule_key":"popularity","weight":0.7,"enabled":true}')
+assert_code "cafeteria_ranking_rule_upsert" "200" "$code"
+
+code=$(api_call "GET" "/cafeteria/ranking-rules" "$admin_token")
+assert_code "cafeteria_ranking_rules_list" "200" "$code"
+
+code=$(api_call "GET" "/cafeteria/recommendations" "$admin_token")
+assert_code "cafeteria_recommendations_list" "200" "$code"
+
+# ── Bedboard: events ──
+code=$(api_call "GET" "/bedboard/events" "$admin_token")
+assert_code "bedboard_events_list" "200" "$code"
+
+# ── Catalog: list available roles (catalog endpoint) ──
+code=$(api_call "GET" "/roles" "$admin_token")
+assert_code "catalog_roles_list_integration" "200" "$code"
+
+# ── Experiments: variant → assign → backtrack full lifecycle ──
+code=$(api_call "POST" "/experiments" "$admin_token" '{"experiment_key":"diet-ab-test"}')
+assert_code "experiment_create_lifecycle" "200" "$code"
+ab_experiment_id=$(python3 -c 'import json; print(json.load(open("/tmp/api_test_body.json")))')
+exp_create_schema_ok=$(python3 - <<'PY'
+import json
+with open('/tmp/api_test_body.json') as f:
+    data = json.load(f)
+print('1' if isinstance(data, int) and data > 0 else '0')
+PY
+)
+if [ "$exp_create_schema_ok" != "1" ]; then
+  fail_case "experiment_create_response_schema" "expected positive integer experiment id from experiment create"
+fi
+pass_case "experiment_create_response_schema" "experiment create returns a positive integer id"
+
+code=$(api_call "POST" "/experiments/$ab_experiment_id/variants" "$admin_token" '{"variant_key":"control","allocation_weight":0.5,"feature_version":"v1"}')
+assert_code "experiment_variant_add_control" "200" "$code"
+
+code=$(api_call "POST" "/experiments/$ab_experiment_id/variants" "$admin_token" '{"variant_key":"treatment","allocation_weight":0.5,"feature_version":"v2"}')
+assert_code "experiment_variant_add_treatment" "200" "$code"
+
+code=$(api_call "POST" "/experiments/$ab_experiment_id/assign" "$admin_token" "{\"user_id\":$member_user_id,\"mode\":\"auto\"}")
+assert_code "experiment_variant_assign" "200" "$code"
+
+code=$(api_call "POST" "/experiments/$ab_experiment_id/backtrack" "$admin_token" '{"from_version":"v2","to_version":"v1","reason":"regression test backtrack"}')
+assert_code "experiment_variant_backtrack" "200" "$code"
+
+# ── Previously-uncovered endpoint: GET /cafeteria/dishes ──
+code=$(api_call "GET" "/cafeteria/dishes" "$admin_token")
+assert_code "cafeteria_dishes_list" "200" "$code"
+dishes_schema_ok=$(python3 - <<'PY'
+import json, sys
+try:
+    data = json.load(open('/tmp/api_test_body.json'))
+    required = {"id", "name", "category", "base_price_cents", "is_published"}
+    ok = isinstance(data, list) and len(data) > 0 and required.issubset(data[0].keys())
+    print("1" if ok else "0")
+except Exception:
+    print("0")
+PY
+)
+if [ "$dishes_schema_ok" != "1" ]; then
+  fail_case "cafeteria_dishes_schema" "response missing required fields (id/name/category/base_price_cents/is_published)"
+fi
+pass_case "cafeteria_dishes_schema" "dishes response items contain required schema fields"
+
+# ── Previously-uncovered endpoint: PUT /patients/<id>/history ──
+code=$(api_call "PUT" "/patients/$patient_id/history" "$admin_token" '{"value":"updated baseline history","reason_for_change":"history correction"}')
+assert_code "patient_history_update" "200" "$code"
+# Verify persistence: re-fetch the patient with reveal_sensitive=true using a
+# user that holds the patient.reveal_sensitive entitlement (clinical1).
+code=$(api_call "GET" "/patients/$patient_id?reveal_sensitive=true" "$clinical_token")
+assert_code "patient_history_get_after_update" "200" "$code"
+history_persisted=$(python3 -c \
+  'import json; print(json.load(open("/tmp/api_test_body.json")).get("history",""))' \
+  2>/dev/null || echo "")
+if [ "$history_persisted" != "updated baseline history" ]; then
+  fail_case "patient_history_persisted" "expected 'updated baseline history' got '$history_persisted'"
+fi
+pass_case "patient_history_persisted" "patient history value survives round-trip through API"
+
+# ── Previously-uncovered endpoint: POST /auth/logout ──
+# Use a fresh session so the rest of the test suite is unaffected.
+logout_test_token=$(login_user "member1" "Admin#OfflinePass123")
+code=$(api_call "POST" "/auth/logout" "$logout_test_token")
+assert_code "logout_returns_200" "200" "$code"
+code=$(api_call "GET" "/orders" "$logout_test_token")
+assert_code "logout_session_invalidated" "401" "$code"
 
 cat >"$REPORT_DIR/api_integration_tests.json" <<EOF
 {"suite":"api_integration_tests","status":"pass"}

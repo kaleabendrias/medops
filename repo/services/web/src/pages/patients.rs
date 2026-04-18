@@ -56,7 +56,7 @@ pub fn PatientsPage(
                 button {
                     class: "primary",
                     onclick: move |_| {
-                        let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                        let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                         spawn(async move {
                             error.set(String::new());
                             match api::search_patients(&token, &patient_query()).await {
@@ -78,7 +78,7 @@ pub fn PatientsPage(
                         onclick: move |_| {
                             let pid = patient.id;
                             selected_patient_id.set(Some(pid));
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             spawn(async move {
                                 match api::get_patient(&token, pid).await {
                                     Ok(profile) => {
@@ -97,7 +97,7 @@ pub fn PatientsPage(
                                 }
                                 let can_reveal = session()
                                     .as_ref()
-                                    .map(|s| can_reveal_revision_fields(&s.stored.role))
+                                    .map(|s| can_reveal_revision_fields(s))
                                     .unwrap_or(false);
                                 if let Ok(items) = api::patient_revisions(&token, pid, can_reveal).await { patient_revisions.set(items); }
                                 if let Ok(items) = api::list_attachments(&token, pid).await { patient_attachments.set(items); }
@@ -140,7 +140,7 @@ pub fn PatientsPage(
                                             return;
                                         }
                                     };
-                                    let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                                    let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                                     spawn(async move {
                                         match api::update_patient(&token, pid, req).await {
                                             Ok(_) => status.set("Patient demographics updated".to_string()),
@@ -163,7 +163,7 @@ pub fn PatientsPage(
                             onclick: move |_| {
                                 if let Some(pid) = selected_patient_id() {
                                     let reason = clinical_reason();
-                                    let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                                    let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                                     let allergies = allergies_value();
                                     let contraindications = contraindications_value();
                                     let history = history_value();
@@ -187,7 +187,7 @@ pub fn PatientsPage(
                             onclick: move |_| {
                                 if let Some(pid) = selected_patient_id() {
                                     let req = VisitNoteRequest { note: visit_note(), reason_for_change: visit_reason() };
-                                    let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                                    let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                                     spawn(async move {
                                         match api::add_visit_note(&token, pid, req).await {
                                             Ok(_) => status.set("Visit note saved".to_string()),
@@ -306,7 +306,7 @@ pub fn PatientsPage(
                                 return;
                             };
                             let queued = attachment_queue();
-                            let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                            let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                             upload_state_kind.set(UploadState::Uploading);
                             upload_progress.set(0);
                             upload_state.set("Uploading queued files...".to_string());
@@ -389,10 +389,10 @@ pub fn PatientsPage(
                             onclick: move |_| {
                                 if let Some(pid) = selected_patient_id() {
                                     let fmt = patient_export_format();
-                                    let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                                    let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                                     let can_reveal = session()
                                         .as_ref()
-                                        .map(|s| can_reveal_revision_fields(&s.stored.role))
+                                        .map(|s| can_reveal_revision_fields(s))
                                         .unwrap_or(false);
                                     spawn(async move {
                                         match api::export_patient(&token, pid, &fmt, can_reveal).await {

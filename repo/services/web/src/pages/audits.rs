@@ -17,7 +17,7 @@ pub fn AuditsPage(
             button {
                 class: "primary",
                 onclick: move |_| {
-                    let token = session().as_ref().map(|s| s.stored.token.clone()).unwrap_or_default();
+                    let token = session().as_ref().map(|s| s.stored.csrf_token.clone()).unwrap_or_default();
                     spawn(async move {
                         match api::list_audits(&token).await {
                             Ok(items) => audits.set(items),

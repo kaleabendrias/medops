@@ -1,229 +1,270 @@
-# Hospital Platform Monorepo
+fullstack
 
-Production-oriented local monorepo that runs fully offline with Docker Compose.
+# Hospital Platform
 
-- Rocket REST API: `http://localhost:8000`
-- Dioxus web app: `http://localhost:8080`
-- MySQL: `localhost:3306`
+A full-stack, offline-capable healthcare platform with patient management, dining/cafeteria ordering, bed-board tracking, A/B experimentation, governance/audit trails, and analytics. Runs entirely inside Docker Compose with no external dependencies.
 
-All runtime configuration is checked in. No `.env` file is required.
+## Architecture & Tech Stack
 
-## Quick Start
+* **Frontend:** Dioxus 0.6 (Rust → WASM), served by Nginx 1.27 on port 8443 (HTTPS/TLS). Port 8080 is retained internally for health-checks and test runners. Nginx reverse-proxies `/api/` to the backend for same-origin requests.
+* **Backend:** Rocket 0.5 (Rust) REST API on port 8000. Argon2id authentication, HttpOnly+Secure cookie session management, CSRF token validation, AES-GCM field-level encryption, role-based access control, append-only audit logging.
+* **Database:** MySQL 8.4 on port 3306. 23 schema migrations, append-only triggers on audit tables, autonomous campaign-closure event.
+* **Containerization:** Docker & Docker Compose (required — the stack runs fully offline)
 
-```bash
-docker compose up -d --build mysql api web
+## Request Flow
+
+```
+Browser (HTTPS :8443)
+  └─▶ Nginx 1.27  (TLS termination, static WASM bundle, /api/* reverse-proxy)
+        └─▶ Rocket API  (http://api:8000, internal Docker network only)
+                └─▶ MySQL 8.4  (mysql:3306, internal Docker network only)
 ```
 
-Health checks:
+1. The browser loads the Dioxus WASM bundle (`index.html`, `*.wasm`, `*.js`) directly from Nginx.
+2. All API calls from the WASM app are relative paths (`/api/v1/...`). Nginx matches the `/api/` prefix and proxies them to `http://api:8000`, preserving the session cookie and CSRF header.
+3. Rocket validates the session cookie, checks RBAC permissions, executes business logic, and queries MySQL over the internal Docker network.
+4. MySQL is never reachable from the host — only the API container and test containers connect to it.
 
-```bash
-curl -fsS http://localhost:8000/api/v1/health
-curl -fsS http://localhost:8080/health
+## Project Structure
+
+```text
+.
+├── crates/
+│   └── contracts/          # Shared DTOs used by both API and web crates
+├── services/
+│   ├── api/                # Rocket REST API (Dockerfile, migrations, src/)
+│   └── web/                # Dioxus WASM frontend (Dockerfile, nginx.conf, src/)
+├── API_tests/              # Integration, authorization matrix, E2E, and browser E2E tests
+├── unit_tests/             # Backend and frontend unit test runners
+├── mysql-init/             # MySQL initialization scripts (event scheduler grant)
+├── scripts/                # Helper scripts (stack.sh)
+├── test_reports/           # Test output (JSON / NDJSON) written by run_tests.sh
+├── docker-compose.yml      # Multi-container orchestration
+├── run_tests.sh            # Standardized test execution script
+└── README.md               # Project documentation
 ```
 
-Run the full local acceptance pipeline:
+## Prerequisites
+
+This project is **zero-config** — no host-side toolchains, language runtimes, or manual database initialization are required. Everything runs inside Docker Compose containers.
+
+* [Docker](https://docs.docker.com/get-docker/) (with BuildKit)
+* [Docker Compose](https://docs.docker.com/compose/install/) v2+
+
+No `curl`, `mysql`, `node`, `cargo`, or `python3` are needed on the host.
+
+## Running the Application
+
+1. **Build and start all containers:**
+
+   ```bash
+   docker-compose up
+   ```
+
+2. **Access the app:**
+
+   **External (host browser / developer access):**
+   * Frontend: `https://localhost:8443` — the only host-exposed port; accept the self-signed certificate warning in your browser.
+   * API via proxy: `https://localhost:8443/api/v1` — requests are forwarded to the backend by nginx.
+
+   **Internal (container-to-container networking only):**
+   * Backend API: `http://api:8000` — reachable only within the Docker network; not exposed on the host. Test containers and nginx use this address.
+   * Database: `mysql:3306` — reachable only within the Docker network.
+
+3. **Stop the application:**
+
+   ```bash
+   docker-compose down -v
+   ```
+
+## End-User Workflow Verification
+
+Once the stack is running, verify the full user journey manually:
+
+1. **Sign in** — open `https://localhost:8443` in a browser (accept the self-signed certificate warning); sign in as `admin` / `Admin#OfflinePass123`. You should be redirected to the Dashboard.
+2. **Role-gated navigation** — confirm the sidebar shows modules appropriate for the admin role (Orders, Patients, Cafeteria, Admin, etc.).
+3. **Patient search** — navigate to Patients and search for a name (e.g. `john`); results should appear without errors.
+4. **Cafeteria order** — navigate to Orders and place a test order; a confirmation or success banner should appear.
+5. **Sign out** — click Sign Out; you should be returned to the login screen and further navigation should be blocked.
+6. **Non-admin restriction** — sign in as `member1`; confirm that admin-only sections (e.g. Admin panel) are absent from the sidebar.
+7. **Sensitive data reveal** — sign in as `clinical1`; verify that patient detail views show sensitive clinical fields (controlled by the `reveal_sensitive` entitlement).
+
+## Testing
+
+All unit, integration, and E2E tests are executed via a single standardized shell script. The script resets containers, rebuilds images, waits for health checks, then runs each test suite in order.
+
+Make sure the script is executable, then run it:
 
 ```bash
-bash run_tests.sh
+chmod +x run_tests.sh
+./run_tests.sh
 ```
 
-## Verification Prerequisites
+The script exits `0` on full success and non-zero on the first failure. A `test_reports/summary.json` file is written with `{"status":"pass"}` or `{"status":"fail","failed_step":"<step>"}`.
 
-Integrated containerized verification requires:
+### Test suites executed by `run_tests.sh`
 
-- Docker + Docker Compose plugin
-- `bash`, `curl`, `python3`, `sha256sum`
+| Step | Script | What it covers |
+| :--- | :--- | :--- |
+| `backend_unit_tests` | `unit_tests/run_backend_unit_tests.sh` | Rust `#[test]` functions in the API crate |
+| `frontend_unit_tests` | `unit_tests/run_frontend_unit_tests.sh` | Rust `#[test]` functions in the web crate (including `*.test.rs` files) |
+| `migration_checks` | `API_tests/migration_checks.sh` | All 23 SQL migrations, schema expectations, append-only triggers |
+| `authorization_matrix_checks` | `API_tests/authorization_matrix.sh` | Role-based access control for every role |
+| `api_integration_tests` | `API_tests/api_integration_tests.sh` | Full API surface: auth, patients, bedboard, cafeteria, orders, campaigns, experiments (variant/assign/backtrack), governance, ingestion, analytics, retention, audit |
+| `e2e_smoke` | `API_tests/e2e_smoke.sh` | Role-journey smoke tests (admin, clinical, cafeteria, member) |
+| `browser_e2e` _(Integration/Proxy Verification)_ | `API_tests/browser_e2e.sh` | Transport-level curl checks: nginx proxy reachability, same-origin login, SPA routing, cookie forwarding, RBAC enforcement through the proxy. Uses `curl -sk` — no real browser. |
+| `playwright_e2e` | `API_tests/playwright_e2e.sh` | True browser-level DOM interactions via Playwright + Chromium across four role journeys: Clinical (patient search + DOM state), Admin (all-nav visibility + patient field masking), Cafeteria (dining access + patient section hidden), Member (restricted sidebar + sign-out). |
 
-Non-Docker frontend checks require:
+### Running individual suites
 
-- Rust toolchain (`rustup`, `cargo`)
-- wasm target: `rustup target add wasm32-unknown-unknown`
-- Optional Dioxus CLI for local serve (`dx`) or Trunk (`trunk`)
-
-## Command Matrix
-
-Integrated containerized verification (authoritative):
+All test suites run inside Docker — no host-level tools (`curl`, `python3`, `bash`) are required.
 
 ```bash
-bash unit_tests/run_backend_unit_tests.sh test_reports
-bash unit_tests/run_frontend_unit_tests.sh test_reports
-bash API_tests/migration_checks.sh test_reports
-bash API_tests/authorization_matrix.sh test_reports
-bash API_tests/api_integration_tests.sh test_reports
-bash API_tests/e2e_smoke.sh test_reports
-bash run_tests.sh
+# API integration tests only (stack must already be running)
+docker compose run --rm -T integration_tests bash API_tests/api_integration_tests.sh test_reports
+
+# Integration/Proxy Verification (curl-based — checks nginx proxy, session cookie, RBAC)
+docker compose run --rm -T integration_tests bash API_tests/browser_e2e.sh test_reports
+
+# Playwright browser E2E (real Chromium DOM interactions — stack must be running)
+docker compose run --rm -T playwright_tests bash API_tests/playwright_e2e.sh test_reports
+
+# Frontend unit tests (runs inside the web build container)
+docker compose run --rm web cargo test --manifest-path services/web/Cargo.toml
 ```
 
-Expected success signals:
+## Seeded Credentials
 
-- each command exits `0`
-- each suite writes `test_reports/<suite>.json` with `"status":"pass"`
-- `bash run_tests.sh` writes `test_reports/summary.json` with `"status":"pass"`
+The database is pre-seeded with the following test users on startup.
 
-Reproducible acceptance evidence is written to `test_reports/`:
+| Role | Username | Password | Notes |
+| :--- | :--- | :--- | :--- |
+| **Admin** | `admin` | `Admin#OfflinePass123` | Full access to all modules including admin, experiments, analytics, ingestion |
+| **Member** | `member1` | `Admin#OfflinePass123` | Self-service orders; no access to clinical or admin routes |
+| **Employee** | `employee1` | `Admin#OfflinePass123` | Standard employee entitlements |
+| **Clinical** | `clinical1` | `Admin#OfflinePass123` | Patient management, visit notes, clinical data reveal |
+| **Cafeteria** | `cafeteria1` | `Admin#OfflinePass123` | Cafeteria management, orders; no patient search or clinical data |
+| **Locked** | `lockout_user` | `Admin#OfflinePass123` | Used to test 5-attempt lockout and 15-minute lockout enforcement |
 
-- `summary.json` overall status
-- `test_pipeline.ndjson` step-by-step pipeline status
-- `*.json` and `*.ndjson` suite outputs per test script
+## Manual API Verification
 
-## Local Frontend Run (Non-Docker)
+Use these `curl` examples to verify core backend functions from the host. All commands go through Nginx (`https://localhost:8443/api/v1`) and require `-k` to accept the self-signed certificate. To call the backend directly from inside a running container, replace `https://localhost:8443/api` with `http://api:8000/api` and drop `-k`.
 
-The supported integrated path is Docker (`mysql + api + web`) because API data, RBAC seeds, and migration checks are containerized and deterministic.
-
-For local frontend-only development against a running API, you can run Rust checks/tests directly:
+### Authentication — `POST /api/v1/auth/login`
 
 ```bash
-cargo test -p web-app
+curl -ks -c /tmp/cookies.txt \
+  -X POST https://localhost:8443/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"Admin#OfflinePass123"}'
 ```
 
-Optional local frontend commands:
+Expected response shape:
+
+```json
+{
+  "csrf_token": "a3f8...64-hex-chars...b921",
+  "user_id": 1,
+  "username": "admin",
+  "role": "admin",
+  "expires_in_minutes": 480
+}
+```
+
+The `csrf_token` (64 hex characters) must be sent as the `X-CSRF-Token` header on every state-changing request (POST / PUT / DELETE / PATCH). The session is maintained via an `HttpOnly` cookie (`hospital_session`) returned in the `Set-Cookie` response header.
+
+### Patient Search — `GET /api/v1/patients/search`
 
 ```bash
-cargo test -p web-app --bin web-app
-cd services/web && trunk serve --release
-cd services/web && dx serve --platform web
+# Capture the session cookie and CSRF token from login
+COOKIE=$(curl -ks -D - -X POST https://localhost:8443/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"Admin#OfflinePass123"}' \
+  | grep -i 'set-cookie:' | grep hospital_session \
+  | sed 's/.*hospital_session=\([^;]*\).*/\1/' | tr -d '\r')
+
+curl -ks "https://localhost:8443/api/v1/patients/search?q=john" \
+  --cookie "hospital_session=$COOKIE"
 ```
 
-Expected success signals:
+Expected response shape (array; may be empty on a fresh database):
 
-- tests: `test result: ok.`
-- local serve: startup banner with local URL and no compile errors
+```json
+[
+  {
+    "id": 1,
+    "mrn": "***5678",
+    "display_name": "John Doe"
+  }
+]
+```
 
-If your machine has the Dioxus CLI installed, you can also run a local dev server from `services/web`:
+Sensitive fields (`allergies`, `contraindications`, `history`) are returned on the full patient profile endpoint (`GET /patients/{id}`) and are masked as `"[REDACTED - privileged reveal required]"` unless the caller holds the `reveal_sensitive` entitlement. Use `?reveal_sensitive=true` with a clinical1 session to see clear values.
+
+### Audit Log Retrieval — `GET /api/v1/audits`
 
 ```bash
-dx serve --platform web
+curl -ks "https://localhost:8443/api/v1/audits" \
+  --cookie "hospital_session=$COOKIE"
 ```
 
-If `dx` or `trunk` is not installed, use Docker as the runtime validation boundary.
+Expected response shape (append-only; entries accumulate as the system is used):
 
-## Helper Scripts
-
-```bash
-./scripts/stack.sh build     # Build all images
-./scripts/stack.sh up        # Start full stack
-./scripts/stack.sh down      # Stop stack
-./scripts/stack.sh logs      # Tail all logs
-./scripts/stack.sh status    # Show service status
-./scripts/stack.sh reset     # Stop + remove volumes
-./scripts/stack.sh mysql     # Open mysql shell in container
+```json
+[
+  {
+    "id": 42,
+    "action_type": "patient.edit",
+    "entity_type": "patient",
+    "entity_id": "1",
+    "actor_username": "admin",
+    "created_at": "2025-01-15 14:30:00"
+  }
+]
 ```
 
-## Services and Responsibilities
-
-- `mysql`: persistence for all domain tables, migrations, and deterministic seed data.
-- `api`: authentication, RBAC, object-level authorization, encryption/masking, lifecycle policy, append-only auditing.
-- `web`: intranet UI that consumes API contracts only.
-- `test_runner`: isolated Rust toolchain used by automated scripts.
-
-## Seeded Users
-
-> **NON-PRODUCTION CREDENTIALS.** The credentials below are for local development
-> and offline testing only. They must **never** be reused in staging, production, or
-> any internet-facing environment. For deployment, override all passwords and secrets
-> via environment variables (see *Credential Overrides* below).
-
-Users are seeded from `services/api/migrations`:
-
-- `admin` / `Admin#OfflinePass123`
-- `member1` / `Admin#OfflinePass123`
-- `employee1` / `Admin#OfflinePass123`
-- `clinical1` / `Admin#OfflinePass123`
-- `cafeteria1` / `Admin#OfflinePass123`
-- `lockout_user` / `Admin#OfflinePass123`
-
-### Credential Overrides
-
-All database and application credentials can be overridden via environment variables
-at deploy time without modifying checked-in files:
-
-```bash
-# Example: override MySQL credentials for a deployment profile
-export MYSQL_ROOT_PASSWORD=<strong-random-secret>
-export MYSQL_PASSWORD=<strong-random-secret>
-export DATABASE_URL=mysql://app_user:<password>@mysql:3306/hospital_platform
-
-docker compose up -d
-```
-
-A `docker-compose.override.yml` can also be used to inject secrets per environment.
-
-## Role Verification (E2E)
-
-- Admin can run privileged endpoints (`/patients/search`, `/ingestion/tasks`, reveal-sensitive patient reads).
-- Clinical users can access patient workflows but are denied dining pricing/inventory management endpoints.
-- Cafeteria users can manage dining/orders/campaigns but are denied clinical records.
-- Catalog metadata routes are auth + authorization protected.
-- Lockout behavior is enforced after repeated failed login attempts.
-
-These are continuously verified by `API_tests/authorization_matrix.sh` and `API_tests/api_integration_tests.sh`.
-
-## Architecture Overview
-
-API layers in `services/api/src` are intentionally strict:
-
-- `contracts`: request/response DTOs and HTTP error mapping.
-- `services`: use-case orchestration, policy checks, lifecycle rules.
-- `repositories`: application persistence traits.
-- `infrastructure`: MySQL repository adapter and local security primitives.
-- `routes`: Rocket handlers and auth extraction.
-
-### Governance Tiered Storage
-
-The governance data model is split across **three distinct physical tables** —
-`governance_raw`, `governance_cleaned`, and `governance_analytics` — defined
-in migration `014_governance_tiered_views.sql`. Cross-tier lineage is
-enforced by **explicit foreign keys** between the tables:
-
-- `governance_cleaned.lineage_source_id` → `governance_raw(id)`
-- `governance_analytics.lineage_source_id` → `governance_cleaned(id)`
-
-Record IDs are globally unique across the three tiers; each insert allocates
-its primary key from a shared `governance_id_sequence` table, so the public
-`/governance/records/{id}` surface remains stable and unambiguous.
-
-## Intranet API Surface
-
-Implemented domains include:
-
-- authentication and session validation
-- RBAC and permission-gated operations
-- patient CRUD, assignment-based object isolation, masked-by-default sensitive fields with privileged reveal
-- bed board transitions with legal state-machine enforcement
-- dining orders with idempotent create and versioned status updates
-- MySQL-authoritative patient attachment payload storage (BLOB-only, no filesystem fallback)
-- ingestion task manager (create, update, versions, rollback, run)
-- governance lineage/tombstone behavior
-- experimentation telemetry and analytics endpoints
-- append-only audit log behavior and retention constraints
-
-### Retention API
-
-| Method | Path | Permission | Description |
-|--------|------|------------|-------------|
-| GET | `/api/v1/retention` | authenticated | Returns current retention settings snapshot (audit, session, patient record days) |
-| GET | `/api/v1/retention/policies` | `audit.read` | Lists all retention policies from database |
-| PUT | `/api/v1/retention/policies/<key>/<years>` | `retention.manage` | Upserts a retention policy by key and minimum years |
-| GET | `/api/v1/analytics/retention` | `audit.read` | Returns user retention cohort metrics (1-day and 7-day active users) |
-
-All retention endpoints require authentication. Policy listing requires `audit.read`. Policy mutation (`PUT`) requires `retention.manage` permission and enforces a minimum of `clinical_years_min` (default 7) for clinical record policies.
-
-## Configuration Notes
-
-- Credentials and configuration are committed for local/offline execution.
-- Field encryption uses a local keyring strategy in the API service.
-- Session/auth/retention defaults live in `services/api/config/default.toml`.
+Every write operation (patient edits, governance creates, user disables, attachment uploads, etc.) emits an audit event. The `entry_hash` chain guarantees that no record can be deleted or modified without detection.
 
 ## Troubleshooting
 
-- API container unhealthy after migration change:
-  - `docker compose logs --no-color api`
-  - check SQL syntax in newest file under `services/api/migrations/`.
-- Failing integration script:
-  - inspect `test_reports/*.json` and `test_reports/*.ndjson`.
-- Attachment upload failures:
-  - confirm file extension and MIME match (PDF/JPG/PNG) and size <= 25 MB.
-  - verify `patient_attachments.payload_blob` exists (`bash API_tests/migration_checks.sh test_reports`).
-- Frontend-only checks:
-  - `cargo test -p web-app`
-  - optional local dev server: `dx serve --platform web` (if Dioxus CLI available).
+### Self-Signed TLS Certificate
+
+The Nginx container uses a self-signed certificate. Browsers and `curl` reject it by default.
+
+* **Browser** — click **Advanced** → **Proceed to localhost (unsafe)** (Chrome / Edge) or **Accept the Risk and Continue** (Firefox).
+* **curl** — add `-k` (or `--insecure`) to skip certificate verification:
+  ```bash
+  curl -ks https://localhost:8443/api/v1/health
+  ```
+* **Playwright / automated tests** — the Playwright config sets `ignoreHTTPSErrors: true`; no manual action is required.
+
+### Containers Not Healthy
+
+If services do not reach the `healthy` state within ~2 minutes:
+
+```bash
+# Check each container's health
+docker inspect --format='{{.State.Health.Status}}' monorepo_api
+docker inspect --format='{{.State.Health.Status}}' monorepo_web
+
+# Tail recent logs for the API
+docker logs monorepo_api --tail 60
+
+# Confirm all containers are running
+docker compose ps
+```
+
+### Database Migration Failures
+
+If the API container exits shortly after startup, a SQL migration likely failed:
+
+```bash
+docker logs monorepo_api 2>&1 | grep -i "migration\|error\|sqlx"
+```
+
+To reset the database volume and retry from scratch (all seeded data is lost):
+
+```bash
+docker compose down -v
+docker compose up -d --build
+```

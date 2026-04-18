@@ -244,3 +244,7 @@ mod tests {
         assert!(validate_attachment("image.PNG", "image/png", 1024).is_ok());
     }
 }
+
+#[cfg(test)]
+#[path = "ui_logic.test.rs"]
+mod ui_logic_extended_tests;
